@@ -51,14 +51,14 @@ if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
   
-  logger.info('Downloading contract ABIs...')
-
   logger.info('Starting server...')
 
-  http_server = WSGIServer(('0.0.0.0', 443),
-                           app,
-                           keyfile=KEYFILE,
-                           certfile=CERTFILE,
-                           handler_class=WebSocketHandler)
+  # http_server = WSGIServer(('0.0.0.0', 443),
+  #                          app,
+  #                          keyfile=KEYFILE,
+  #                          certfile=CERTFILE,
+  #                          handler_class=WebSocketHandler)
+
+  http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
 
   http_server.serve_forever()  
