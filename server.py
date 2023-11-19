@@ -56,21 +56,28 @@ names = ['Dolphins v Patriots',
 
 def get_new_game(name):
   return {
-    'id': str(uuid.uuid4()),
+    'game_id': str(uuid.uuid4()),
     'name': name,
     'players': {},
+    'claimed_squares': {},
   }
 
-def get_new_player():
+def get_new_player(player_id=None):
   return {
-    'id': str(uuid.uuid4()),
-    'game_id': None,
+    'player_id': player_id,
+    'games': {}
+    # {
+    #   'game_name': game['name'],
+    #   'claimed_squares': []
+    # }
   }
 
 def send_to_all_except(event, message, game, player_id):
   for player in game['players'].values():
-    if player['id'] != player_id:
-      emit(event, message, room=player['id'])
+    if player['player_id'] != player_id:
+      if event == 'new_player_joined' or event == 'square_claimed':
+        room = f"{player['player_id']}-{game['game_id']}"
+      emit(event, message, room=room)
 
 @socketio.on('join_game')
 def join_game(data):
@@ -78,26 +85,31 @@ def join_game(data):
 
   if data['player_id'] in game['players']:
     logger.info(f"Player {data['player_id']} already joined game.")
+    emit('game_joined', game, room=data['player_id'])
     return
   
   player = players[data['player_id']]
-  player['game_id'] = game['id']
+  player['games'][data['game_id']] = {
+    'game_name': game['name'],
+    'claimed_squares': []
+  }
 
   game['players'][data['player_id']] = player
-  logger.info(f"Game info: {game}")
 
-  logger.info(f"Player {player['id']} joined game.")
-  emit('game_joined', game, room=player['id'])
+  logger.info(f"Player {player['player_id']} joined game: {game}")  
+  logger.info(f"Join game Game info: {game}")
+
+  join_room(game['game_id'])
+  join_room(f"{player['player_id']}-{game['game_id']}")
   
-  logger.info(f"Game info: {game}")
-
-  join_room(game['id'])
+  emit('game_joined', game, room=f"{player['player_id']}-{game['game_id']}")
+  send_to_all_except('new_player_joined', player, game, data['player_id'])
 
 def generate_games():
   logger.info('Generating games...')
   for i in range(0, 9):
     game = get_new_game(names[i])
-    games[game['id']] = game   
+    games[game['game_id']] = game   
 
 @socketio.on('heartbeat')
 def handle_heartbeat(data):
@@ -110,6 +122,17 @@ def handle_heartbeat(data):
 def handle_claim_square(data):
   logger.info(f"Received claim square from client: {data}")
   game = games[data['game_id']]
+  game['claimed_squares'].update({f"{data['row']}{data['column']}": data['player_id']})
+  
+  player = game['players'][data['player_id']]
+  player['games'][data['game_id']]['claimed_squares'].append(
+    {
+      'row': data['row'],
+      'column': data['column'],
+    }
+  )
+
+  logger.info(f"Claim square game info: {game}")
 
   message = {
     'row': data['row'],
@@ -122,17 +145,18 @@ def handle_claim_square(data):
 @socketio.on('connect')
 def handle_connect():
   logger.info('Client connected.')
-  player = get_new_player()
-  players[player['id']] = player
-  logger.info(f"Player info: {player}")
+  
+  player_id = request.args.get('player_id')
 
-  join_room(player['id'])
+  player = get_new_player(player_id)
+  players[player['player_id']] = player
+  logger.info(f"Connect player info: {player}")
 
-  games_list = [{"game_id": game["id"], "name": game["name"]} for game in games.values()]
+  join_room(player_id)
 
-  emit('connected', { 'games_list': games_list, 'player': player }, room=player['id'])
+  games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
 
-  # join_game(player)
+  emit('connected', { 'games_list': games_list, 'player': player }, room=player['player_id'])
 
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
@@ -142,12 +166,12 @@ if __name__ == '__main__':
 
   generate_games()
 
-  # http_server = WSGIServer(('0.0.0.0', 443),
-  #                          app,
-  #                          keyfile=KEYFILE,
-  #                          certfile=CERTFILE,
-  #                          handler_class=WebSocketHandler)
+  http_server = WSGIServer(('0.0.0.0', 443),
+                           app,
+                           keyfile='/etc/letsencrypt/live/fs.generalsolutions43.com/privkey.pem',
+                           certfile='/etc/letsencrypt/live/fs.generalsolutions43.com/fullchain.pem',
+                           handler_class=WebSocketHandler)
 
-  http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
+  # http_server = WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
 
   http_server.serve_forever()  
