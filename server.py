@@ -75,8 +75,8 @@ def get_new_player(player_id=None):
 def send_to_all_except(event, message, game, player_id):
   for player in game['players'].values():
     if player['player_id'] != player_id:
-      if event == 'new_player_joined' or event == 'square_claimed':
-        room = f"{player['player_id']}-{game['game_id']}"
+      room = f"{player['player_id']}-{game['game_id']}"
+      logger.info(f"Sending {event} to room: {room}")
       emit(event, message, room=room)
 
 @app.route('/games', methods=['GET'])
@@ -96,6 +96,7 @@ def join_game(data):
 
   if data['player_id'] in game['players']:
     logger.info(f"Player {data['player_id']} already joined game.")
+    join_room(f"{data['player_id']}-{game['game_id']}")
     emit('game_joined', game, room=data['player_id'])
     return
   
