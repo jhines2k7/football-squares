@@ -150,6 +150,7 @@ def handle_claim_square(data):
     'row': data['row'],
     'column': data['column'],
     'claimed_by': data['player_id'],
+    'game_id': data['game_id']
   }
 
   send_to_all_except('square_claimed', message, game, data['player_id'])
