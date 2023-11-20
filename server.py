@@ -79,6 +79,17 @@ def send_to_all_except(event, message, game, player_id):
         room = f"{player['player_id']}-{game['game_id']}"
       emit(event, message, room=room)
 
+@app.route('/games', methods=['GET'])
+def get_games():
+  game_id = request.args.get('game_id')
+  player_id = request.args.get('player_id')
+
+  if game_id in games:
+    game = games[game_id]
+    if player_id in game['players']:
+      games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
+      return jsonify(games_list)
+
 @socketio.on('join_game')
 def join_game(data):
   game = games[data['game_id']]
