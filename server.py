@@ -95,28 +95,21 @@ def leave_game(data):
   game = games[data['game_id']]
   player = game['players'][data['player_id']]
 
-  logger.info(f"Player {player['player_id']} left game: {game}")
-  logger.info(f"Leave game: {game}")
-
-  leave_room(game['game_id'])
-  leave_room(f"{player['player_id']}-{game['game_id']}")
-
-  # remove the squares claimed by the player
-  for square in game['claimed_squares']:
-    if game['claimed_squares'][square] == data['player_id']:
-      del game['claimed_squares'][square]
-
-  del player['games'][data['game_id']]
-  del game['players'][data['player_id']]
-
-  # emit('game_left', game, room=f"{player['player_id']}-{game['game_id']}")
   message = {
     'game': game,
     'player': player
   }
 
   send_to_all_except('player_left_game', message, game, data['player_id'])
-  
+
+  logger.info(f"Player {player['player_id']} left game: {game}")
+  logger.info(f"Leave game: {game}")
+
+  leave_room(game['game_id'])
+  leave_room(f"{player['player_id']}-{game['game_id']}")
+
+  del player['games'][data['game_id']]
+  del game['players'][data['player_id']]
 
 @socketio.on('join_game')
 def join_game(data):
@@ -160,9 +153,12 @@ def handle_heartbeat(data):
 
 @socketio.on('unclaim_square')
 def handle_unclaim_square(data):
-  logger.info(f"Received unclaim square from client: {data}")
+  logger.info(f"Unclaiming square: {data}")
   game = games[data['game_id']]
-  del game['claimed_squares'][f"{data['row']}{data['column']}"]
+  square = data['square']
+  row_col = f"{square['row']}{square['column']}"
+  logger.info(f"Unclaiming row_col: {row_col}")
+  del game['claimed_squares'][row_col]
 
   player = game['players'][data['player_id']]
   player['games'][data['game_id']]['claimed_squares'].remove(
