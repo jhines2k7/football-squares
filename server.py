@@ -117,7 +117,14 @@ def leave_game(data):
 
 @socketio.on('join_game')
 def join_game(data):
-  game = games[data['game_id']]
+  try:
+    game = games[data['game_id']]
+    # handle KeyError if game does not exist
+  except KeyError:
+    # if game does not exist, emit an event to the client
+    logger.info(f"Game {data['game_id']} does not exist.")
+    emit('game_not_found', data['player_id'])
+    return
 
   if data['player_id'] in game['players']:
     logger.info(f"Player {data['player_id']} already joined game.")
