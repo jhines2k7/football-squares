@@ -81,14 +81,11 @@ def send_to_all_except(event, message, game, player_id):
 
 @app.route('/games', methods=['GET'])
 def get_games():
-  game_id = request.args.get('game_id')
   player_id = request.args.get('player_id')
 
-  if game_id in games:
-    game = games[game_id]
-    if player_id in game['players']:
-      games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
-      return jsonify(games_list)
+  if player_id in players:
+    games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
+    return jsonify(games_list)
 
 @socketio.on('leave_game')
 def leave_game(data):
@@ -103,7 +100,13 @@ def leave_game(data):
   send_to_all_except('player_left_game', message, game, data['player_id'])
 
   logger.info(f"Player {player['player_id']} left game: {game}")
-  logger.info(f"Leave game: {game}")
+  logger.info(f"Squares claimed in game {data['game_id']} before unclaim: {game['claimed_squares']}")
+
+  # unclaim player squares in game
+  for square in player['games'][data['game_id']]['claimed_squares']:
+    del game['claimed_squares'][f"{square['row']}{square['column']}"]
+
+  logger.info(f"Squares claimed in game {data['game_id']} after unclaim: {game['claimed_squares']}")
 
   leave_room(game['game_id'])
   leave_room(f"{player['player_id']}-{game['game_id']}")
