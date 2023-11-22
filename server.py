@@ -85,6 +85,7 @@ def get_games():
 
   if player_id in players:
     games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
+    
     return jsonify(games_list)
 
 @socketio.on('leave_game')
