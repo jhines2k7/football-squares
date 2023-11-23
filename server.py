@@ -8,6 +8,7 @@ import os
 import math
 import queue
 import binascii
+import requests
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -43,20 +44,9 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 games = {}
 players = {}
 
-names = ['Dolphins v Patriots', 
-         'Chiefs v Bills', 
-         'Buccaneers v Packers', 
-         'Rams v Seahawks', 
-         'Ravens v Titans', 
-         'Bears v Saints', 
-         'Browns v Steelers',
-         'Colts v Jaguars',
-         'Vikings v Lions',
-         'Jets v Panthers']
-
-def get_new_game(name):
+def get_new_game(name, id):
   return {
-    'game_id': str(uuid.uuid4()),
+    'game_id': id,
     'name': name,
     'players': {},
     'claimed_squares': {},
@@ -149,11 +139,26 @@ def join_game(data):
   emit('game_joined', game, room=f"{player['player_id']}-{game['game_id']}")
   send_to_all_except('new_player_joined', player, game, data['player_id'])
 
-def generate_games():
-  logger.info('Generating games...')
-  for i in range(0, 9):
-    game = get_new_game(names[i])
-    games[game['game_id']] = game   
+def get_games_for_current_week():
+  logger.info('Games for current week...')
+
+  url = "http://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json?api_key=e92psk369hgpspwbu2eysmua"
+
+  response = requests.get(url)
+
+  if response.status_code == 200:
+    data = response.json()
+    # logger.info(data)
+
+    sportradar_game_list = data['week']['games']
+
+    for game in sportradar_game_list:
+      name = f"{game['home']['name']} vs {game['away']['name']}"
+      
+      new_game = get_new_game(name, game['id'])
+      games[new_game['game_id']] = new_game
+  else:
+    logger.info(f"Request failed with status code {response.status_code}")
 
 @socketio.on('heartbeat')
 def handle_heartbeat(data):
@@ -228,7 +233,7 @@ if __name__ == '__main__':
   
   logger.info('Starting server...')
 
-  generate_games()
+  get_games_for_current_week()
 
   http_server = WSGIServer(('0.0.0.0', 443),
                            app,
