@@ -1,3 +1,6 @@
+from gevent import monkey
+monkey.patch_all()
+
 import datetime
 import sys
 import logging
@@ -15,8 +18,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
-from gevent import monkey
-monkey.patch_all()
 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
@@ -153,10 +154,11 @@ def get_games_for_current_week():
     sportradar_game_list = data['week']['games']
 
     for game in sportradar_game_list:
-      name = f"{game['home']['name']} vs {game['away']['name']}"
+      if game['status'] != 'closed' and game['status'] != 'inprogress' and game['status'] != 'created':
+        name = f"{game['home']['name']} vs {game['away']['name']}"
       
-      new_game = get_new_game(name, game['id'])
-      games[new_game['game_id']] = new_game
+        new_game = get_new_game(name, game['id'])
+        games[new_game['game_id']] = new_game
   else:
     logger.info(f"Request failed with status code {response.status_code}")
 
