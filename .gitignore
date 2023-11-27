@@ -7,7 +7,6 @@ my_task.py
 receiver.py
 scheduler.py
 clear_queue.py
-poll_boxscore_task.py
 dynamic_workers.py
 kill_workers.sh
 .env*

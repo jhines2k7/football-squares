@@ -30,13 +30,17 @@ from logging.handlers import RotatingFileHandler
 
 from datetime import datetime
 from multiprocessing import Process, Value
-from redis import Redis
+# from redis import Redis
 from rq import Queue, Worker
 from poll_boxscore_task import poll_boxscore
 from rq_scheduler import Scheduler
 from healthcheck import HealthCheck
 from decimal import Decimal
 from azure.eventhub import EventHubConsumerClient
+
+import redis
+
+from threading import Thread
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -92,9 +96,11 @@ CERTFILE = os.getenv("CERTFILE")
 # AZURE_QUEUE_NAME = os.getenv("AZURE_QUEUE_NAME")
 # COSMOS_PARTITION_KEY = os.getenv("COSMOS_PARTITION_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST")
+logger.info(f"Redis host: {REDIS_HOST}")
 REDIS_PORT = os.getenv("REDIS_PORT")
 REDIS_USERNAME = os.getenv("REDIS_USERNAME")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+logger.info(f"Redis password: {REDIS_PASSWORD}")
 SPORTRADAR_URL = os.getenv("SPORTRADAR_URL")
 SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY")
 EVENTHUB_CONNECTION_STR = os.getenv("EVENTHUB_CONNECTION_STR")
@@ -117,11 +123,11 @@ app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 
-rps_contract_factory_abi = None
-rps_contract_abi = None
-cosmos_db = None
-queue_client = None
-gas_oracles = []
+# rps_contract_factory_abi = None
+# rps_contract_abi = None
+# cosmos_db = None
+# queue_client = None
+# gas_oracle = []
 ethereum_prices = []
 
 health = HealthCheck()
@@ -130,11 +136,13 @@ app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 games = {}
 players = {}
 
-redis_conn = Redis(host=REDIS_HOST, 
-                    port=REDIS_PORT, 
-                    username=REDIS_USERNAME, 
-                    password=REDIS_PASSWORD,
-                    ssl=True, ssl_cert_reqs=None)
+redis_client = redis.Redis(host=REDIS_HOST, 
+                  port=REDIS_PORT, 
+                  username=REDIS_USERNAME, 
+                  password=REDIS_PASSWORD,
+                  ssl=True, ssl_cert_reqs=None)
+
+redis_client.set('foo', 'bar')                  
 
 def eth_to_usd(eth_balance):
   latest_price = ethereum_prices[-1] #get_eth_price()
@@ -155,15 +163,15 @@ def receive_events(event_hub_connection_str, event_hub_name):
   with consumer:
     consumer.receive(on_event=on_event, starting_position="-1")
 
-receive_events(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME)
+# receive_events(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME)
 
 def start_worker_for_queue(queue_name):
-  worker = Worker([Queue(queue_name, connection=redis_conn)], connection=redis_conn)
+  worker = Worker([Queue(queue_name, connection=redis_client)], connection=redis_client)
   worker.work()
  
 def schedule_task_with_dedicated_worker(game_id, run_at):
   # Create a scheduler instance and schedule the task
-  scheduler = Scheduler(queue_name=game_id, connection=redis_conn)
+  scheduler = Scheduler(queue_name=game_id, connection=redis_client)
   
   scheduler.enqueue_at(run_at, poll_boxscore, game_id)
 
@@ -269,6 +277,7 @@ def join_game(data):
   send_to_all_except('new_player_joined', player, game, data['player_id'])
 
 def get_games_for_current_week():
+  logger.info(redis_client.get('foo'))
   games = {}
   
   logger.info('Games for current week...')
@@ -360,16 +369,17 @@ def handle_connect():
 
   emit('connected', { 'games_list': games_list, 'player': player }, room=player['player_id'])
 
-if __name__ == '__main__':
-  from geventwebsocket.handler import WebSocketHandler
-  from gevent.pywsgi import WSGIServer
+def set_up():
+  guids = [str(uuid.uuid4()) for _ in range(3)]
+
+  games = [
+    {"scheduled": "2023-11-27T13:46:54+00:00", "game_id": str(guids[0])},
+    {"scheduled": "2023-11-27T13:48:54+00:00", "game_id": str(guids[1])},
+    {"scheduled": "2023-11-27T13:50:54+00:00", "game_id": str(guids[2])}
+  ]
   
-  logger.info('Starting server...')
-
-  games = get_games_for_current_week()
-
   processes = []
-  for game in games.values():    
+  for game in games:    
     run_at = datetime.fromisoformat(game["scheduled"])
     print(f"Scheduling job for game id: {game['game_id']} at {run_at}")
     p = schedule_task_with_dedicated_worker(game["game_id"], run_at)
@@ -383,6 +393,25 @@ if __name__ == '__main__':
   # Optionally, wait for all processes
   for p in processes:
     p.join()
+
+  consumer = EventHubConsumerClient.from_connection_string(
+    conn_str=EVENTHUB_CONNECTION_STR, 
+    eventhub_name=EVENTHUB_NAME, 
+    consumer_group="$Default")
+    
+  with consumer:
+    consumer.receive(on_event=on_event, starting_position="-1")
+  
+if __name__ == '__main__':
+  from geventwebsocket.handler import WebSocketHandler
+  from gevent.pywsgi import WSGIServer
+
+  listener_thread = Thread(target=set_up)
+  listener_thread.start()
+  
+  logger.info('Starting server...')
+
+  # games = get_games_for_current_week()
 
   http_server = WSGIServer(('0.0.0.0', 443),
                            app,
