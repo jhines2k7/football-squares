@@ -1,3 +1,15 @@
 service-account.json
 .football-squares
 .vscode
+scratch.txt
+__pycache__
+my_task.py
+receiver.py
+scheduler.py
+clear_queue.py
+poll_boxscore_task.py
+dynamic_workers.py
+kill_workers.sh
+.env*
+logs
+worker_pids.txt
