@@ -142,8 +142,6 @@ redis_client = redis.Redis(host=REDIS_HOST,
                   password=REDIS_PASSWORD,
                   ssl=True, ssl_cert_reqs=None)
 
-redis_client.set('foo', 'bar')                  
-
 def eth_to_usd(eth_balance):
   latest_price = ethereum_prices[-1] #get_eth_price()
   eth_price = Decimal(latest_price)  # convert the result to Decimal
@@ -205,6 +203,32 @@ def send_to_all_except(event, message, game, player_id):
       room = f"{player['player_id']}-{game['game_id']}"
       logger.info(f"Sending {event} to room: {room}")
       emit(event, message, room=room)
+
+@app.route('/scoring-play/<game_id>', methods=['POST'])
+def scoring_play(game_id):
+  data = request.get_json()
+  scoring_plays = data['scoring_plays']
+  logger.info(f"Number of scoring plays received for game id: {game_id}: {len(scoring_plays)}")
+
+  for scoring_play in scoring_plays:
+    logger.info(f"Scoring play type: {scoring_play['type']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Scoring play play_type: {scoring_play['play_type']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Scoring play home points: {scoring_play['home_points']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Scoring play away points: {scoring_play['away_points']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Home team: {scoring_play['home_team']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Away team: {scoring_play['away_team']} for game id: {game_id} with play id: {scoring_play['id']}")
+  # game = games[game_id]
+  # player = game['players'][data['player_id']]
+
+  # message = {
+  #   'game': game,
+  #   'player': player,
+  #   'scoring_play': data['scoring_play']
+  # }
+
+  # send_to_all_except('scoring_play', message, game, data['player_id'])
+
+  return jsonify({ 'success': True })
 
 @app.route('/games', methods=['GET'])
 def get_games():
@@ -277,7 +301,6 @@ def join_game(data):
   send_to_all_except('new_player_joined', player, game, data['player_id'])
 
 def get_games_for_current_week():
-  logger.info(redis_client.get('foo'))
   games = {}
   
   logger.info('Games for current week...')
@@ -369,20 +392,13 @@ def handle_connect():
 
   emit('connected', { 'games_list': games_list, 'player': player }, room=player['player_id'])
 
-def set_up():
-  guids = [str(uuid.uuid4()) for _ in range(3)]
-
-  games = [
-    {"scheduled": "2023-11-27T13:46:54+00:00", "game_id": str(guids[0])},
-    {"scheduled": "2023-11-27T13:48:54+00:00", "game_id": str(guids[1])},
-    {"scheduled": "2023-11-27T13:50:54+00:00", "game_id": str(guids[2])}
-  ]
-  
+def schedule_games(games):
   processes = []
   for game in games:    
     run_at = datetime.fromisoformat(game["scheduled"])
-    print(f"Scheduling job for game id: {game['game_id']} at {run_at}")
+    logger.info(f"Scheduling job for game id: {game['game_id']} at {run_at}")
     p = schedule_task_with_dedicated_worker(game["game_id"], run_at)
+    logger.info(f"Scheduled job for game id: {game['game_id']} at {run_at}")
     processes.append(p)
 
   # Write each pid from the processes array to file
@@ -391,24 +407,35 @@ def set_up():
       file.write(f"{p.pid}\n")
       
   # Optionally, wait for all processes
-  for p in processes:
-    p.join()
+  # for p in processes:
+  #   p.join()
 
-  consumer = EventHubConsumerClient.from_connection_string(
-    conn_str=EVENTHUB_CONNECTION_STR, 
-    eventhub_name=EVENTHUB_NAME, 
-    consumer_group="$Default")
+  # consumer = EventHubConsumerClient.from_connection_string(
+  #   conn_str=EVENTHUB_CONNECTION_STR, 
+  #   eventhub_name=EVENTHUB_NAME, 
+  #   consumer_group="$Default")
     
-  with consumer:
-    consumer.receive(on_event=on_event, starting_position="-1")
+  # with consumer:
+  #   consumer.receive(on_event=on_event, starting_position="-1")
   
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
 
-  listener_thread = Thread(target=set_up)
-  listener_thread.start()
-  
+  guids = [str(uuid.uuid4()) for _ in range(3)]
+
+  games = [
+    {"scheduled": "2023-11-28T02:55:00+00:00", "game_id": str(guids[0])},
+    {"scheduled": "2023-11-28T02:56:00+00:00", "game_id": str(guids[1])},
+    {"scheduled": "2023-11-28T02:57:00+00:00", "game_id": str(guids[2])}
+  ]
+
+  scheduling_thread = Thread(target=schedule_games, args=(games, ))
+  scheduling_thread.start()
+
+  # receiver_thread = Thread(target=receive_events, args=(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME, ))
+  # receiver_thread.start()
+
   logger.info('Starting server...')
 
   # games = get_games_for_current_week()
