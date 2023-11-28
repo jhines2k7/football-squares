@@ -13,7 +13,7 @@ EVENTHUB_NAME = os.getenv("EVENTHUB_NAME")
 
 logging.basicConfig(
   stream=sys.stderr,
-  level=logging.DEBUG,
+  level=logging.INFO,
   format='%(levelname)s:%(asctime)s:%(message)s'
 )
 
@@ -29,7 +29,7 @@ def on_event(partition_context, event):
 
   url = f"https://fs.generalsolutions43.com/scoring-play/{game_id}"
 
-  response = requests.post(url, json=scoring_play_data['scoring_plays'])
+  response = requests.post(url, json=scoring_play_data)
 
   logger.info(f"Response status code: {response.status_code}")
   logger.info(f"Response: {response.json()}")

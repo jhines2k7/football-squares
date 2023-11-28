@@ -44,7 +44,7 @@ from threading import Thread
 
 logging.basicConfig(
   stream=sys.stderr,
-  level=logging.DEBUG,
+  level=logging.INFO,
   format='%(levelname)s:%(asctime)s:%(message)s'
 )
 
@@ -171,7 +171,7 @@ def schedule_task_with_dedicated_worker(game_id, run_at):
   # Create a scheduler instance and schedule the task
   scheduler = Scheduler(queue_name=game_id, connection=redis_client)
   
-  scheduler.enqueue_at(run_at, poll_boxscore, game_id)
+  scheduler.enqueue_at(run_at, poll_boxscore, game_id, timeout=-1)
 
   # Start a dedicated worker for this queue
   p = Process(target=start_worker_for_queue, args=(game_id, ))
@@ -208,15 +208,17 @@ def send_to_all_except(event, message, game, player_id):
 def scoring_play(game_id):
   data = request.get_json()
   scoring_plays = data['scoring_plays']
+  home_team = data['home_team']
+  away_team = data['away_team']
   logger.info(f"Number of scoring plays received for game id: {game_id}: {len(scoring_plays)}")
 
   for scoring_play in scoring_plays:
-    logger.info(f"Scoring play type: {scoring_play['type']} for game id: {game_id} with play id: {scoring_play['id']}")
-    logger.info(f"Scoring play play_type: {scoring_play['play_type']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Scoring play type: \"{scoring_play['type']}\" for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Scoring play play_type: \"{scoring_play['play_type']}\" for game id: {game_id} with play id: {scoring_play['id']}")
     logger.info(f"Scoring play home points: {scoring_play['home_points']} for game id: {game_id} with play id: {scoring_play['id']}")
     logger.info(f"Scoring play away points: {scoring_play['away_points']} for game id: {game_id} with play id: {scoring_play['id']}")
-    logger.info(f"Home team: {scoring_play['home_team']} for game id: {game_id} with play id: {scoring_play['id']}")
-    logger.info(f"Away team: {scoring_play['away_team']} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Home team: {home_team} for game id: {game_id} with play id: {scoring_play['id']}")
+    logger.info(f"Away team: {away_team} for game id: {game_id} with play id: {scoring_play['id']}")
   # game = games[game_id]
   # player = game['players'][data['player_id']]
 
@@ -425,9 +427,9 @@ if __name__ == '__main__':
   guids = [str(uuid.uuid4()) for _ in range(3)]
 
   games = [
-    {"scheduled": "2023-11-28T02:55:00+00:00", "game_id": str(guids[0])},
-    {"scheduled": "2023-11-28T02:56:00+00:00", "game_id": str(guids[1])},
-    {"scheduled": "2023-11-28T02:57:00+00:00", "game_id": str(guids[2])}
+    {"scheduled": "2023-11-28T06:40:00+00:00", "game_id": str(guids[0])},
+    {"scheduled": "2023-11-28T06:42:00+00:00", "game_id": str(guids[1])},
+    {"scheduled": "2023-11-28T06:44:00+00:00", "game_id": str(guids[2])}
   ]
 
   scheduling_thread = Thread(target=schedule_games, args=(games, ))

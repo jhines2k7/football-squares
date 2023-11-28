@@ -11,7 +11,7 @@ import requests
 
 logging.basicConfig(
   stream=sys.stderr,
-  level=logging.DEBUG,
+  level=logging.INFO,
   format='%(levelname)s:%(asctime)s:%(message)s'
 )
 
@@ -54,9 +54,8 @@ def poll_boxscore(game_id):
   if response.status_code == 200:
     data = response.json()
     mock_scoring_plays = data['scoring_plays']
-    home_team = f"{data['summary']['home']['name']} {data['summary']['home']['name']['market']}"
-    away_team = f"{data['summary']['away']['name']} {data['summary']['away']['name']['market']}"
-    logger.info(f"Mock scoring plays: {mock_scoring_plays[0]}")
+    home_team = f"{data['summary']['home']['market']} {data['summary']['home']['name']}"
+    away_team = f"{data['summary']['away']['market']} {data['summary']['away']['name']}"
     # current_scoring_plays = data['scoring_plays']
 
     # new_scoring_plays = list(set(current_scoring_plays) - set(previous_scoring_plays))
@@ -94,16 +93,15 @@ def poll_boxscore(game_id):
     #   previous_scoring_plays = current_scoring_plays
     # else:
     #   logger.error(f"Request failed with status code {response.status_code}")
+    random_number = random.randint(1, 100)
 
-    if random.choice([True, False]):
+    if random_number % 2 == 0:
       current_scoring_plays.append(random.choice(mock_scoring_plays))
 
     set1 = set(obj['id'] for obj in current_scoring_plays)
     set2 = set(obj['id'] for obj in previous_scoring_plays)
     diff_ids = set1 - set2
     new_scoring_plays = [obj for obj in current_scoring_plays if obj['id'] in diff_ids]
-
-    # new_scoring_plays = list(set(current_scoring_plays) - set(previous_scoring_plays))
     
     if len(new_scoring_plays) > 0:
       logger.info(f"Found new scoring plays: {new_scoring_plays}")
@@ -123,7 +121,7 @@ def poll_boxscore(game_id):
 
     count += 1
 
-    if count == 20:
+    if count == 1200:
       game_status = 'closed'
 
     # game_status = data['status']
