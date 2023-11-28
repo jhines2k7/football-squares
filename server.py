@@ -17,7 +17,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
-from googleapiclient.http import MediaIoBaseDownload
 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
@@ -30,17 +29,18 @@ from logging.handlers import RotatingFileHandler
 
 from datetime import datetime
 from multiprocessing import Process, Value
-# from redis import Redis
 from rq import Queue, Worker
 from poll_boxscore_task import poll_boxscore
 from rq_scheduler import Scheduler
 from healthcheck import HealthCheck
 from decimal import Decimal
-from azure.eventhub import EventHubConsumerClient
+from threading import Thread
+from pydantic import BaseModel
+from typing import List
+from typing import Dict
+from azure.cosmos import CosmosClient, PartitionKey
 
 import redis
-
-from threading import Thread
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -88,13 +88,14 @@ KEYFILE = os.getenv("KEYFILE")
 CERTFILE = os.getenv("CERTFILE")
 # COINGECKO_API = os.getenv("COINGECKO_API")
 # GAS_ORACLE_API_KEY = os.getenv("GAS_ORACLE_API_KEY")
-# COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
-# COSMOS_KEY = os.getenv("COSMOS_KEY")
-# COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
-# COSMOS_CONTAINER_NAME = os.getenv("COSMOS_CONTAINER_NAME")
+COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
+COSMOS_KEY = os.getenv("COSMOS_KEY")
+COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
+COSMOS_GAMES_CONTAINER_NAME = os.getenv("COSMOS_GAMES_CONTAINER_NAME")
+COSMOS_PLAYERS_CONTAINER_NAME = os.getenv("COSMOS_PLAYERS_CONTAINER_NAME")
+COSMOS_PARTITION_KEY = os.getenv("COSMOS_PARTITION_KEY")
 # AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 # AZURE_QUEUE_NAME = os.getenv("AZURE_QUEUE_NAME")
-# COSMOS_PARTITION_KEY = os.getenv("COSMOS_PARTITION_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST")
 logger.info(f"Redis host: {REDIS_HOST}")
 REDIS_PORT = os.getenv("REDIS_PORT")
@@ -125,16 +126,14 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 
 # rps_contract_factory_abi = None
 # rps_contract_abi = None
-# cosmos_db = None
+cosmos_games_container = None
+cosmos_players_container = None
 # queue_client = None
 # gas_oracle = []
 ethereum_prices = []
 
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
-
-games = {}
-players = {}
 
 redis_client = redis.Redis(host=REDIS_HOST, 
                   port=REDIS_PORT, 
@@ -147,22 +146,6 @@ def eth_to_usd(eth_balance):
   eth_price = Decimal(latest_price)  # convert the result to Decimal
   return eth_balance * eth_price
 
-def on_event(partition_context, event):
-  # Print the event data
-  print("Received event from partition: {}".format(partition_context.partition_id))
-  print("Event data: {}".format(event.body_as_str()))
-
-def receive_events(event_hub_connection_str, event_hub_name):
-  consumer = EventHubConsumerClient.from_connection_string(
-    conn_str=event_hub_connection_str, 
-    eventhub_name=event_hub_name, 
-    consumer_group="$Default")
-    
-  with consumer:
-    consumer.receive(on_event=on_event, starting_position="-1")
-
-# receive_events(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME)
-
 def start_worker_for_queue(queue_name):
   worker = Worker([Queue(queue_name, connection=redis_client)], connection=redis_client)
   worker.work()
@@ -172,30 +155,38 @@ def schedule_task_with_dedicated_worker(game_id, run_at):
   scheduler = Scheduler(queue_name=game_id, connection=redis_client)
   
   scheduler.enqueue_at(run_at, poll_boxscore, game_id, timeout=-1)
-
+ 
   # Start a dedicated worker for this queue
   p = Process(target=start_worker_for_queue, args=(game_id, ))
   p.start()
   return p
 
-def get_new_game(name, id, scheduled):
-  return {
-    'game_id': id,
-    'name': name,
-    'scheduled': scheduled,
-    'players': {},
-    'claimed_squares': {},
-  }
+class Player(BaseModel):
+  id: str
+  games: List[str]
 
-def get_new_player(player_id=None):
-  return {
-    'player_id': player_id,
-    'games': {}
-    # {
-    #   'game_name': game['name'],
-    #   'claimed_squares': []
-    # }
-  }
+class Square(BaseModel):
+  id: str
+  home_points: int
+  away_points: int
+  player_id: str
+
+class ScoringPlay(BaseModel):
+  id: str
+  type: str
+  play_type: str
+  home_points: int
+  away_points: int
+
+class Game(BaseModel):
+  id: str
+  contract_address: str
+  name: str
+  scheduled: str
+  players: List[str]
+  claimed_squares: List[Square]
+  payouts: List[Square]
+  scoring_plays: List[ScoringPlay]
 
 def send_to_all_except(event, message, game, player_id):
   for player in game['players'].values():
@@ -270,16 +261,18 @@ def leave_game(data):
 
 @socketio.on('join_game')
 def join_game(data):
-  try:
-    game = games[data['game_id']]
-    # handle KeyError if game does not exist
-  except KeyError:
-    # if game does not exist, emit an event to the client
-    logger.info(f"Game {data['game_id']} does not exist.")
+  game = None
+
+  global games_directory
+  if data['game_id'] in games_directory.games:
+    game = games_directory.games.get(data['game_id'])
+  else:
+    logger.error(f"Game {data['game_id']} does not exist.")
     emit('game_not_found', data['player_id'])
     return
 
-  if data['player_id'] in game['players']:
+  global player_directory
+  if data['player_id'] in player_directory.players:
     logger.info(f"Player {data['player_id']} already joined game.")
     join_room(f"{data['player_id']}-{game['game_id']}")
     emit('game_joined', game, room=data['player_id'])
@@ -303,16 +296,13 @@ def join_game(data):
   send_to_all_except('new_player_joined', player, game, data['player_id'])
 
 def get_games_for_current_week():
-  games = {}
-  
   logger.info('Games for current week...')
 
   response = requests.get(f"{SPORTRADAR_URL}?api_key={SPORTRADAR_API_KEY}")
+  games_directory_data = {}
 
   if response.status_code == 200:
     data = response.json()
-    # logger.info(data)
-
     sportradar_game_list = data['week']['games']
 
     for game in sportradar_game_list:
@@ -320,10 +310,19 @@ def get_games_for_current_week():
         name = f"{game['home']['name']} vs {game['away']['name']}"
         scheduled = game['scheduled']
       
-        new_game = get_new_game(name, game['id'], scheduled)
-        games[new_game['game_id']] = new_game
-    
-    return games
+        new_game = {
+          'game_id': game['id'],
+          'name': name,
+          'scheduled': scheduled,
+          'players': [],
+          'claimed_squares': []
+        }
+
+        games_directory_data['games'] = {
+            game['id']: new_game
+        }
+
+    return GamesDirectory(**games_directory_data)
   else:
     logger.error(f"Request failed with status code {response.status_code}")
 
@@ -337,37 +336,18 @@ def handle_heartbeat(data):
 @socketio.on('unclaim_square')
 def handle_unclaim_square(data):
   logger.info(f"Unclaiming square: {data}")
-  game = games[data['game_id']]
-  square = data['square']
-  row_col = f"{square['row']}{square['column']}"
-  logger.info(f"Unclaiming row_col: {row_col}")
-  del game['claimed_squares'][row_col]
+  game = games_directory.get(data['game_id'])
+  del game.claimed_squares[data['square_id']]
 
-  player = game['players'][data['player_id']]
-  player['games'][data['game_id']]['claimed_squares'].remove(
-    {
-      'row': data['square']['row'],
-      'column': data['square']['column'],
-    }
-  )
-
-  logger.info(f"Game state after player: {data['player_id']} unclaimed square: {game}")
+  logger.info(f"Game state after square unclaimed: {game.json()}")
 
 @socketio.on('claim_square')
 def handle_claim_square(data):
   logger.info(f"Received claim square from client: {data}")
-  game = games[data['game_id']]
-  game['claimed_squares'].update({f"{data['row']}{data['column']}": data['player_id']})
-  
-  player = game['players'][data['player_id']]
-  player['games'][data['game_id']]['claimed_squares'].append(
-    {
-      'row': data['row'],
-      'column': data['column'],
-    }
-  )
+  game = games_directory.get(data['game_id'])
+  game.claimed_squares.append(Square(**data['square']))
 
-  logger.info(f"Claim square game info: {game}")
+  logger.info(f"Game state after square claimed: {game.json()}")
 
   message = {
     'row': data['row'],
@@ -384,15 +364,23 @@ def handle_connect():
   
   player_id = request.args.get('player_id')
 
-  player = get_new_player(player_id)
-  players[player['player_id']] = player
-  logger.info(f"Connect player info: {player}")
+  player_directory_data = {
+    'players': {
+      player_id: Player(game_ids=[])
+    }
+  }
+  
+  global player_directory
+  player_directory = PlayerDirectory(**player_directory_data)
+
+  logger.info(f"Player {player_id} connected.")
 
   join_room(player_id)
 
-  games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games.values()]
+  global games_directory
+  games_list = [{"game_id": game["game_id"], "name": game["name"]} for game in games_directory.games]
 
-  emit('connected', { 'games_list': games_list, 'player': player }, room=player['player_id'])
+  emit('connected', { 'games_list': games_list, 'player_id': player_id }, room=player_id)
 
 def schedule_games(games):
   processes = []
@@ -419,10 +407,34 @@ def schedule_games(games):
     
   # with consumer:
   #   consumer.receive(on_event=on_event, starting_position="-1")
-  
+def create_cosmos_games_container():
+  client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
+  database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
+  key_path = PartitionKey(path=COSMOS_PARTITION_KEY)
+
+  return database.create_container_if_not_exists(
+    id=COSMOS_GAMES_CONTAINER_NAME,
+    partition_key=key_path,
+    offer_throughput=400
+  )
+
+def create_cosmos_players_container():
+  client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
+  database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
+  key_path = PartitionKey(path=COSMOS_PARTITION_KEY)
+
+  return database.create_container_if_not_exists(
+    id=COSMOS_PLAYERS_CONTAINER_NAME,
+    partition_key=key_path,
+    offer_throughput=400
+  )
+
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
+
+  cosmos_games_container = create_cosmos_games_container()
+  cosmos_players_container = create_cosmos_players_container()
 
   guids = [str(uuid.uuid4()) for _ in range(3)]
 
@@ -440,7 +452,7 @@ if __name__ == '__main__':
 
   logger.info('Starting server...')
 
-  # games = get_games_for_current_week()
+  # games_directory = get_games_for_current_week()
 
   http_server = WSGIServer(('0.0.0.0', 443),
                            app,
