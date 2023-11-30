@@ -5,6 +5,7 @@ import logging
 import sys
 from dotenv import load_dotenv
 import os
+from models.football_squares import ScoringPlayDTO
 
 load_dotenv(".env.poll_boxscore")
 
@@ -21,15 +22,16 @@ logger = logging.getLogger(__name__)
 
 def on_event(partition_context, event):
   logger.info("Received event from partition: {}".format(partition_context.partition_id))
-  
   scoring_play_data = json.loads(event.body_as_str())
-  logger.info(f"Scoring plays sent: {len(scoring_play_data['scoring_plays'])}")
+  logger.info(f"Scoring play data from event: {scoring_play_data}")
+  scoring_play_dto = ScoringPlayDTO(**scoring_play_data)
+  logger.info(f"Scoring plays sent: {len(scoring_play_dto.scoring_plays)}")
   
-  game_id = scoring_play_data["game_id"]
+  game_id = scoring_play_dto.game_id
 
   url = f"https://fs.generalsolutions43.com/scoring-play/{game_id}"
 
-  response = requests.post(url, json=scoring_play_data)
+  response = requests.post(url, json=scoring_play_dto.model_dump_json())
 
   logger.info(f"Response status code: {response.status_code}")
   logger.info(f"Response: {response.json()}")

@@ -8,6 +8,9 @@ import logging
 import sys
 from dotenv import load_dotenv
 import requests
+from pydantic import BaseModel
+from typing import List
+from models.football_squares import ScoringPlay, ScoringPlayDTO
 
 logging.basicConfig(
   stream=sys.stderr,
@@ -37,11 +40,9 @@ def send_event(event_data):
 
     producer.send_batch(event_data_batch)
 
-def poll_boxscore(game_id):
+def poll_boxscore(game_id, week_id):
   current_scoring_plays = []
   previous_scoring_plays = []
-  # scoring_plays = []
-  mock_scoring_plays = []
   home_team = None
   away_team = None
 
@@ -53,69 +54,48 @@ def poll_boxscore(game_id):
 
   if response.status_code == 200:
     data = response.json()
-    mock_scoring_plays = data['scoring_plays']
+    
     home_team = f"{data['summary']['home']['market']} {data['summary']['home']['name']}"
     away_team = f"{data['summary']['away']['market']} {data['summary']['away']['name']}"
-    # current_scoring_plays = data['scoring_plays']
 
-    # new_scoring_plays = list(set(current_scoring_plays) - set(previous_scoring_plays))
-
-    # previous_scoring_plays = current_scoring_plays
   else:
     logger.error(f"Request failed with status code {response.status_code}")
   
   pid = os.getpid()
 
-  # while data['status'] != 'closed':
   count = 0
   game_status = None
-  while game_status != 'closed': 
+  # while data['status'] != 'closed':
+  while game_status != 'closed':
     logger.info(f"Polling boxscore for game id: {game_id} on PID: {pid}")
-    
-    # response = requests.get(f"{SPORTRADAR_URL}/{game_id}/boxscore.json?api_key={SPORTRADAR_API_KEY}")
+    random_num = random.randint(1, 100)   
+    if random_num % 5 == 0:
+       # response = requests.get(f"{SPORTRADAR_URL}/{game_id}/boxscore.json?api_key={SPORTRADAR_API_KEY}")
+      random_idx = random.randint(0, len(data['scoring_plays']) - 1)
+      current_scoring_plays.append(
+        ScoringPlay(
+          id=data['scoring_plays'][random_idx]['id'],
+          type=data['scoring_plays'][random_idx]['type'],
+          play_type=data['scoring_plays'][random_idx]['play_type'],
+          home_points=data['scoring_plays'][random_idx]['home_points'],
+          away_points=data['scoring_plays'][random_idx]['away_points'],
+          home_team=home_team,
+          away_team=away_team
+        )
+      )       
 
-    # if response.status_code == 200:
-    #   data = response.json()
-    #   current_scoring_plays = data['scoring_plays']
+      set_current_scoring_play_ids = set(scoring_play.id for scoring_play in current_scoring_plays)
+      set_previous_scoring_play_ids = set(scoring_play.id for scoring_play in previous_scoring_plays)
+      diff_ids = set_current_scoring_play_ids - set_previous_scoring_play_ids
+      new_scoring_plays = [scoring_play for scoring_play in current_scoring_plays if scoring_play.id in diff_ids]
 
-    #   new_scoring_plays = list(set(current_scoring_plays) - set(previous_scoring_plays))
+      previous_scoring_plays = current_scoring_plays.copy()
 
-    #   if len(new_scoring_plays) > 0:
-    #     logger.info(f"Found new scoring plays: {new_scoring_plays}")
-        
-    #     event_data = {
-    #       'game_id': game_id,
-    #       'scoring_plays': new_scoring_plays,
-    #     }
-
-    #     send_event(json.dumps(event_data))
-
-    #   previous_scoring_plays = current_scoring_plays
-    # else:
-    #   logger.error(f"Request failed with status code {response.status_code}")
-    random_number = random.randint(1, 100)
-
-    if random_number % 2 == 0:
-      current_scoring_plays.append(random.choice(mock_scoring_plays))
-
-    set1 = set(obj['id'] for obj in current_scoring_plays)
-    set2 = set(obj['id'] for obj in previous_scoring_plays)
-    diff_ids = set1 - set2
-    new_scoring_plays = [obj for obj in current_scoring_plays if obj['id'] in diff_ids]
-    
-    if len(new_scoring_plays) > 0:
-      logger.info(f"Found new scoring plays: {new_scoring_plays}")
-      
-      event_data = {
-        'game_id': game_id,
-        'home_team': home_team,
-        'away_team': away_team,
-        'scoring_plays': new_scoring_plays,
-      }
-
-      send_event(json.dumps(event_data))
-
-    previous_scoring_plays = current_scoring_plays
+      if len(new_scoring_plays) > 0:
+        logger.info(f"Found new scoring plays: {new_scoring_plays}")
+        scoring_play_dto = ScoringPlayDTO(game_id=game_id, week_id=week_id, scoring_plays=new_scoring_plays)
+        logger.info(f"Sending event dto: {scoring_play_dto.model_dump_json()}")
+        send_event(scoring_play_dto.model_dump_json())
 
     time.sleep(5)
 
