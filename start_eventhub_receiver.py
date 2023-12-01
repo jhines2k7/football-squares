@@ -5,7 +5,7 @@ import logging
 import sys
 from dotenv import load_dotenv
 import os
-from models.football_squares import ScoringPlayDTO
+from models import ScoringPlayDTO
 
 load_dotenv(".env.poll_boxscore")
 
@@ -35,6 +35,8 @@ def on_event(partition_context, event):
 
   logger.info(f"Response status code: {response.status_code}")
   logger.info(f"Response: {response.json()}")
+
+  partition_context.update_checkpoint(event)
 
 def receive_events():
   consumer = EventHubConsumerClient.from_connection_string(

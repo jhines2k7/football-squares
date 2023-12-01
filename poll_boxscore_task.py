@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import requests
 from pydantic import BaseModel
 from typing import List
-from models.football_squares import ScoringPlay, ScoringPlayDTO
+from models import ScoringPlay, ScoringPlayDTO
 
 logging.basicConfig(
   stream=sys.stderr,
