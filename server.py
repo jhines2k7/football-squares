@@ -36,9 +36,10 @@ from healthcheck import HealthCheck
 from decimal import Decimal
 from threading import Thread
 from pydantic import BaseModel
-from typing import List
+from typing import Any, List
 from typing import Dict
 from azure.cosmos import CosmosClient, PartitionKey
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 from models import ScoringPlay, ScoringPlayDTO, Square, Game, Player
 
 import redis
@@ -164,10 +165,12 @@ def schedule_task_with_dedicated_worker(game: Game, run_at: datetime):
   p.start()
   return p
 
-def send_to_all_except(event:str, message:str, game: Game, excluded_player_id:str):
+def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:str):
+  logger.info(f"Broadcasting message to all except: {excluded_player_id}")
   for player_id in game.players:
-    if player_id != excluded_player_id:
+    if player_id != excluded_player_id:      
       room = f"{player_id}-{game.id}"
+      logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, room=room)
 
 @app.route('/scoring-play/<game_id>', methods=['POST'])
@@ -258,26 +261,20 @@ def leave_game(data):
   result = cosmos_games_container.read_item(item=data['game_id'], partition_key=data['week_id'])
   game = Game(**result)
 
-  if data['player_id'] in game.get('players'):
-    message = {
-      'game': game,
-    }
-
-    send_to_all_except('player_left_game', message, game, data['player_id'])
-
+  if data['player_id'] in game.players:
     logger.info(f"Player {data['player_id']} left game: {game.id}")
-    logger.info(f"Squares claimed in game {game.id} before unclaim: ")
-    for square in game.claimed_squares:
-      logger.info(square.model_dump_json())
 
-    # unclaim player squares in game
-    for square in game.claimed_squares:
-      if square.player_id == data['player_id']:
-        game.claimed_squares.remove(square)
+    # Get the squares where square.player_id equals data['player_id']
+    unclaimed_squares = [square.model_dump() for square in game.claimed_squares if square.player_id == data['player_id']]
+    remaining_squares = [square for square in game.claimed_squares if square.player_id != data['player_id']]
+    
+    game.claimed_squares.clear()
+
+    game.claimed_squares = remaining_squares
 
     logger.info(f"Game state after unclaiming squares: {game.model_dump_json()}")
 
-    leave_room(game['game_id'])
+    leave_room(game.id)
     leave_room(f"{data['player_id']}-{game.id}")
 
     game.players.remove(data['player_id'])
@@ -285,20 +282,30 @@ def leave_game(data):
 
     cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
 
+    message = {
+      'player_id': data['player_id'], 
+      'game_id': game.id,
+      'unclaimed_squares': unclaimed_squares
+    }
+    
+    send_to_all_except('player_left_game', message, game, data['player_id'])
+
 @socketio.on('join_game')
 def join_game(data):
   global cosmos_games_container
   result = cosmos_games_container.read_item(item=data['game_id'], partition_key=data['week_id'])
   game = Game(**result)
+  logger.info(f"Game state before player {data['player_id']} joined game: {game.model_dump_json()}")
 
   global cosmos_players_container
-  result = cosmos_players_container.read_item(item=data['player_id'], partition_key=data['week_id'])
+  result = cosmos_players_container.read_item(item=data['player_id'], partition_key=data['player_level'])
   player = Player(**result)
+  logger.info(f"Player state before joining game: {player.model_dump_json()}")
 
-  if data['player_id'] in game.players:
+  if player.id in game.players:
     logger.info(f"Player {player.id} already joined game.")
-    join_room(f"{data['player_id']}-{game.id}")
-    emit('game_joined', { 'game': game.model_dump() }, room=player.id)
+    join_room(f"{player.id}-{game.id}")
+    emit('game_joined', game.model_dump(), room=player.id)
     return
   
   player.games.append(game.id)
@@ -314,8 +321,8 @@ def join_game(data):
   join_room(game.id)
   join_room(f"{player.id}-{game.id}")
   
-  emit('game_joined', { 'game': game.model_dump() }, room=f"{player.id}-{game.id}")
-  send_to_all_except('new_player_joined', player.model_dump(), game, player.id)
+  emit('game_joined', game.model_dump(), room=player.id)
+  send_to_all_except('new_player_joined', { "player_id": player.id }, game, player.id)
 
 def save_games_for_current_week():
   logger.info('Games for current week...')
@@ -330,25 +337,29 @@ def save_games_for_current_week():
 
     for game in sportradar_game_list:
       if game['status'] != 'closed' and game['status'] != 'inprogress':
-        name = f"{game['home']['name']} vs {game['away']['name']}"
-        logger.info(f"Saving game: {name}")
-        scheduled = game['scheduled']
-        logger.info(f"Game scheduled: {scheduled}")
+        try:
+          # Read item to check if it exists
+          cosmos_games_container.read_item(item=game['id'], partition_key=data['week']['id'])
+          logger.warning(f"Game {game['id']} already exists.")
+          continue
+        except CosmosResourceNotFoundError:
+          name = f"{game['home']['name']} vs {game['away']['name']}"
+          scheduled = game['scheduled']
+          logger.info(f"Saving game: {name} scheduled for: {scheduled}")
+          cosmos_games_container.create_item(body={
+            'contract_address': '0xC8334AaF263Ec942778c6B04e1dF2d9Bcd08cCa1',
+            'id': game['id'],
+            'week_id': data['week']['id'],
+            'name': name,
+            'scheduled': scheduled,
+            'players': [],
+            'claimed_squares': [],
+            'payouts': [],
+            'status': game['status'],
+            'scoring_plays': []
+          })
 
-        cosmos_games_container.upsert_item(body={
-          'contract_address': '0xC8334AaF263Ec942778c6B04e1dF2d9Bcd08cCa1',
-          'id': game['id'],
-          'week_id': data['week']['id'],
-          'name': name,
-          'scheduled': scheduled,
-          'players': [],
-          'claimed_squares': [],
-          'payouts': [],
-          'status': game['status'],
-          'scoring_plays': []
-        })
-
-        logger.info(f"Game {game['id']} saved: {name}")
+          logger.info(f"Game {game['id']} saved: {name}")
 
 @socketio.on('heartbeat')
 def handle_heartbeat(data):
@@ -359,11 +370,10 @@ def handle_heartbeat(data):
 
 @socketio.on('unclaim_square')
 def handle_unclaim_square(data):
-  logger.info(f"Unclaiming square: {data}")
   square = Square(**data['square'])
-  logger.info(f"Square: {square.model_dump_json()}")
+  logger.info(f"Unclaiming square: {square.model_dump_json()}")
   global cosmos_games_container
-  result = cosmos_games_container.read_item(item=data['game_id'], partition_key=data['week_id'])
+  result = cosmos_games_container.read_item(item=square.game_id, partition_key=square.week_id)
   game = Game(**result)
   game.claimed_squares.remove(square)
   
@@ -371,57 +381,55 @@ def handle_unclaim_square(data):
 
   logger.info(f"Game state after square unclaimed: {game.model_dump_json()}")
 
+  send_to_all_except('square_unclaimed', square.model_dump(), game, square.player_id)
+
 @socketio.on('claim_square')
 def handle_claim_square(square: Square):
-  logger.info(f"Received claim square from client: {square}")
   square = Square(**square)
-  logger.info(f"Square: {square.model_dump_json()}")
+  logger.info(f"Claiming square: {square.model_dump_json()}")
   global cosmos_games_container
   result = cosmos_games_container.read_item(item=square.game_id, partition_key=square.week_id)
   game = Game(**result)
+  logger.info(f"Game state before square claimed: {game.model_dump_json()}")
   game.claimed_squares.append(square)
+  logger.info(f"Game state after square claimed: {game.model_dump_json()}")
 
   cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
+  logger.info(f"Successfully updated game: {game.id}")
 
-  send_to_all_except('square_claimed', square.model_dump_json(), game, square.player_id)
+  send_to_all_except('square_claimed', square.model_dump(), game, square.player_id)
 
 @socketio.on('connect')
 def handle_connect():
-  logger.info('Client connected.')
+  try:
+    logger.info('Client connected.')
+    
+    player_id = request.args.get('player_id')
+
+    global cosmos_games_container
   
-  player_id = request.args.get('player_id')
+    player_data = {
+      "id": player_id,
+      "level": 0,  
+      "address": "",
+      "games": []
+    }
 
-  global cosmos_games_container
-  games = list(cosmos_games_container.query_items(
-    query="SELECT * FROM c WHERE c.status=@status",
-    parameters=[
-      {"name": "@status", "value": "scheduled"}
-    ],
-    enable_cross_partition_query=True
-  ))
+    player = Player(**player_data)
 
-  games_list = [{
-    "week_id": game["week_id"],
-    "game_id": game["id"], 
-    "name": game["name"]} for game in games]
-  
-  player_data = {
-    "id": player_id,
-    "week_id": games_list[0]["week_id"],  
-    "address": "",
-    "games": []
-  }
+    global cosmos_players_container
+    try:
+      cosmos_players_container.read_item(item=player.id, partition_key=player.level)
+    except CosmosResourceNotFoundError:
+      cosmos_players_container.upsert_item(body=player.model_dump())
 
-  player = Player(**player_data)
+    logger.info(f"Player {player.id} connected.")
 
-  global cosmos_players_container
-  cosmos_players_container.upsert_item(body=player.model_dump())
+    join_room(player.id)
 
-  logger.info(f"Player {player_id} connected.")
-
-  join_room(player_id)
-
-  emit('connected', { 'games_list': games_list, 'player': player.model_dump() }, room=player_id)
+    emit('connected', player.model_dump(), room=player.id)
+  except Exception as e:
+    logger.error(f"An error occurred in handle_connect: {str(e)}")
 
 def schedule_games(games: List[Game]):
   processes = []
@@ -512,8 +520,8 @@ if __name__ == '__main__':
 
   games = [game1, game2, game3]
 
-  scheduling_thread = Thread(target=schedule_games, args=(games, ))
-  scheduling_thread.start()
+  # scheduling_thread = Thread(target=schedule_games, args=(games, ))
+  # scheduling_thread.start()
 
   # receiver_thread = Thread(target=receive_events, args=(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME, ))
   # receiver_thread.start()

@@ -4,8 +4,8 @@ from typing import Optional
 
 class Player(BaseModel):
   id: str
-  week_id: str
   address: str
+  level: int
   games: List[str]
 
 class Square(BaseModel):
