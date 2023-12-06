@@ -24,19 +24,26 @@ def on_event(partition_context, event):
   logger.info("Received event from partition: {}".format(partition_context.partition_id))
   scoring_play_data = json.loads(event.body_as_str())
   logger.info(f"Scoring play data from event: {scoring_play_data}")
-  scoring_play_dto = ScoringPlayDTO(**scoring_play_data)
-  logger.info(f"Scoring plays sent: {len(scoring_play_dto.scoring_plays)}")
-  
-  game_id = scoring_play_dto.game_id
 
-  url = f"https://fs.generalsolutions43.com/scoring-play/{game_id}"
+  try:
+    if scoring_play_data["scoring_plays"]:
+      scoring_play_data["scoring_play"] = scoring_play_data["scoring_plays"][0]
+      del scoring_play_data["scoring_plays"]
+  except KeyError:
+    logger.error("Missing key 'scoring_plays' in scoring_play_data")
 
-  response = requests.post(url, json=scoring_play_dto.model_dump_json())
+    scoring_play_dto = ScoringPlayDTO(**scoring_play_data)
+    
+    game_id = scoring_play_dto.game_id
 
-  logger.info(f"Response status code: {response.status_code}")
-  logger.info(f"Response: {response.json()}")
+    url = f"https://fs.generalsolutions43.com/scoring-play/{game_id}"
 
-  partition_context.update_checkpoint(event)
+    response = requests.post(url, json=scoring_play_dto.model_dump_json())
+
+    logger.info(f"Response status code: {response.status_code}")
+    logger.info(f"Response: {response.json()}")
+
+    partition_context.update_checkpoint(event)
 
 def receive_events():
   consumer = EventHubConsumerClient.from_connection_string(

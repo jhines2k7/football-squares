@@ -5,8 +5,8 @@ from typing import Optional
 class Player(BaseModel):
   id: str
   address: str
-  level: int
   games: List[str]
+  week_id: str
 
 class Square(BaseModel):
   id: str
@@ -38,6 +38,7 @@ class Game(BaseModel):
   scoring_plays: List[ScoringPlay]
 
 class ScoringPlayDTO(BaseModel):
+  event_num: Optional[int] = -1
   week_id: Optional[str] = "0796e6a9-84ca-4651-9813-bc8bb391ad95"
   game_id: str
-  scoring_plays: List[ScoringPlay]
+  scoring_play: ScoringPlay

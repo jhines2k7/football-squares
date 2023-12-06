@@ -27,7 +27,7 @@ from eth_account import Account
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 
-from datetime import datetime
+from datetime import datetime, timezone
 from multiprocessing import Process, Value
 from rq import Queue, Worker
 from poll_boxscore_task import poll_boxscore
@@ -135,6 +135,7 @@ cosmos_players_container = None
 # queue_client = None
 # gas_oracle = []
 ethereum_prices = []
+WEEK_ID = None
 
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
@@ -171,67 +172,81 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
     if player_id != excluded_player_id:      
       room = f"{player_id}-{game.id}"
       logger.info(f"Sending message {message} to room: {room}")
-      emit(event, message, room=room)
+      emit(event, message, to=room, namespace='/')
+
+def send_to_all(event:str, message:Any, game: Game):
+  logger.info(f"Broadcasting message to all players in game: {game.id}")
+  for player_id in game.players:
+    room = f"{player_id}-{game.id}"
+    logger.info(f"Sending message {message} to room: {room}")
+    
+    emit(event, message, to=room, namespace='/')
 
 @app.route('/scoring-play/<game_id>', methods=['POST'])
 def scoring_play(game_id: str):
   # data = request.get_json()
   logger.info(f"Scoring play data received: {request.get_json()}")
   scoring_play_dto = ScoringPlayDTO.model_validate_json(request.get_json())
+  # scoring_play_dto = ScoringPlayDTO(**request.get_json())
   logger.info(f"Scoring play dto: {scoring_play_dto.model_dump_json()}")
-  scoring_plays = scoring_play_dto.scoring_plays
-  logger.info(f"Number of scoring plays received for game id: {game_id}: {len(scoring_plays)}")
 
   global cosmos_games_container
 
   try:
-    result = cosmos_games_container.read_item(item=scoring_play_dto.game_id, partition_key=scoring_play_dto.week_id)
+    result = cosmos_games_container.read_item(item=game_id, partition_key=scoring_play_dto.week_id)
     game = Game(**result)
-    logger.info(f"Scoring plays will be added to game: {game.id}")
+    
+    scoring_play = scoring_play_dto.scoring_play
+    logger.info(f"Scoring play: {scoring_play.model_dump_json()} will be added to game: {game.id}")
 
-    for scoring_play in scoring_plays:
-      logger.info(f"Scoring play type: \"{scoring_play.type}\" for game id: {game_id} with play id: {scoring_play.id}")
-      logger.info(f"Scoring play play_type: \"{scoring_play.play_type}\" for game id: {game_id} with play id: {scoring_play.id}")
-      logger.info(f"Scoring play home points: {scoring_play.home_points} for game id: {game_id} with play id: {scoring_play.id}")
-      logger.info(f"Scoring play away points: {scoring_play.away_points} for game id: {game_id} with play id: {scoring_play.id}")
-      logger.info(f"Home team: {scoring_play.home_team} for game id: {game_id} with play id: {scoring_play.id}")
-      logger.info(f"Away team: {scoring_play.away_team} for game id: {game_id} with play id: {scoring_play.id}")
+    game.scoring_plays.append(scoring_play)
 
-      game.scoring_plays.append(scoring_play)
+    # logger.info(f"Game state after adding scoring plays: {game.model_dump_json()}")
+    # cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
+    # logger.info(f"Successfully added scoring plays to game: {game.id}")
+    
+    home_points_ones = scoring_play.home_points % 10
+    away_points_ones = scoring_play.away_points % 10
 
-    logger.info(f"Game state after adding scoring plays: {game.model_dump_json()}")
-    cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
-    logger.info(f"Successfully added scoring plays to game: {game.id}")
-
-    home_points_tens = (scoring_play.home_points // 10) % 10
-    away_points_tens = (scoring_play.away_points // 10) % 10
-
-    square_id_to_find = f"{home_points_tens}{away_points_tens}" # home = row, away = column
+    square_id_to_find = f"{home_points_ones}{away_points_ones}" # home = row, away = column
 
     logger.info(f"Square id to find: {square_id_to_find}")
 
     square = find_square_by_id(game.claimed_squares, square_id_to_find)
 
     if square is not None:
-      emit('square_match', { 'square': square.model_dump(), 'scoring_play': scoring_play.model_dump() }, 
-           room=f"{game.id}")
+      message = {
+        'event_num': scoring_play_dto.event_num,
+        'square': square.model_dump(),
+        'scoring_play': scoring_play.model_dump()
+      }
+
+      logger.info(f"Square found: {square}")
+      
+      emit('square_match', message, to=square.player_id, namespace='/')
+      send_to_all_except('mark_claimed_square_match', message, game, square.player_id)
     else:
+      square_data = {
+        "id": square_id_to_find, 
+        "game_id": game.id, 
+        "week_id": game.week_id, 
+        "player_id":'',
+        "home_points": home_points_ones,
+        "away_points": away_points_ones
+      }
+      message = {
+        'event_num': scoring_play_dto.event_num,
+        'square': Square(**square_data).model_dump(),
+        'scoring_play': scoring_play.model_dump()
+      }
+
       logger.info(f"No square found for scoring play: {scoring_play.model_dump_json()}")
-      emit('mark_unclaimed_square', { "square": square.model_dump() }, room=f"{game.id}")
-    
+      # emit('mark_unclaimed_square_match', message, room=game.id, namespace='/')
+      send_to_all('mark_unclaimed_square_match', message, game)
+      logger.info(f"Broadcasted message to all players in game: {game.id}")
+  
   except CosmosResourceNotFoundError:
     return jsonify([])
-
-  # game = games[game_id]
-  # player = game['players'][data['player_id']]
-
-  # message = {
-  #   'game': game,
-  #   'player': player,
-  #   'scoring_play': data['scoring_play']
-  # }
-
-  # send_to_all_except('scoring_play', message, game, data['player_id'])
 
   return jsonify({ 'success': True })
 
@@ -239,21 +254,37 @@ def find_square_by_id(squares: List[Square], square_id: str):
   for square in squares:
     if square.id == square_id:
       return square
+    
+def ten_min_from_start(game):
+  scheduled_time = datetime.strptime(game.scheduled, '%Y-%m-%dT%H:%M:%S%z')
+  current_time = datetime.now(timezone.utc)
+  time_difference = scheduled_time - current_time
+  if time_difference.total_seconds() >= 600:
+    return True
 
-@app.route('/games', methods=['GET'])
-def get_games():
+def get_saved_games_for_week():
+  global WEEK_ID
   global cosmos_games_container
-  games = list(cosmos_games_container.query_items(
-    query="SELECT * FROM c WHERE c.status=@status",
+  results = list(cosmos_games_container.query_items(
+    query="SELECT * FROM c WHERE c.status!=@status and c.week_id=@week_id",
     parameters=[
-      {"name": "@status", "value": "scheduled"}
+      {"name": "@status", "value": "closed"},
+      {"name": "@week_id", "value": WEEK_ID}
     ],
     enable_cross_partition_query=True
   ))
+
+  return [Game(**game) for game in results]
+
+@app.route('/games', methods=['GET'])
+def get_games():
+  games = get_saved_games_for_week()
+  # scheduled_games = [game for game in games if ten_min_from_start(game)]
+
   return jsonify([{
-    "week_id": game["week_id"],
-    "game_id": game["id"], 
-    "name": game["name"]} for game in games])
+    "week_id": game.week_id,
+    "game_id": game.id, 
+    "name": game.name} for game in games])
 
 @socketio.on('leave_game')
 def leave_game(data):
@@ -298,14 +329,15 @@ def join_game(data):
   logger.info(f"Game state before player {data['player_id']} joined game: {game.model_dump_json()}")
 
   global cosmos_players_container
-  result = cosmos_players_container.read_item(item=data['player_id'], partition_key=data['player_level'])
+  result = cosmos_players_container.read_item(item=data['player_id'], partition_key=data['week_id'])
   player = Player(**result)
   logger.info(f"Player state before joining game: {player.model_dump_json()}")
 
   if player.id in game.players:
     logger.info(f"Player {player.id} already joined game.")
-    join_room(f"{player.id}-{game.id}")
-    emit('game_joined', game.model_dump(), room=player.id)
+    # join_room(game.id, namespace='/')
+    join_room(f"{player.id}-{game.id}", namespace='/')
+    emit('game_joined', game.model_dump(), to=player.id, namespace='/')
     return
   
   player.games.append(game.id)
@@ -318,11 +350,11 @@ def join_game(data):
 
   logger.info(f"Game state after player {player.id} joined game: {game.model_dump_json()}")
 
-  join_room(game.id)
-  join_room(f"{player.id}-{game.id}")
+  # join_room(game.id, namespace='/')
+  join_room(f"{player.id}-{game.id}", namespace='/')
   
-  emit('game_joined', game.model_dump(), room=player.id)
-  send_to_all_except('new_player_joined', { "player_id": player.id }, game, player.id)
+  emit('game_joined', game.model_dump(), room=player.id, namespace='/')
+  send_to_all_except('new_player_joined', { "player_id": player.id, "game_id": game.id }, game, player.id)
 
 def save_games_for_current_week():
   logger.info('Games for current week...')
@@ -334,39 +366,34 @@ def save_games_for_current_week():
   if response.status_code == 200:
     data = response.json()
     sportradar_game_list = data['week']['games']
+    
+    global WEEK_ID
+    WEEK_ID = data['week']['id']
 
     for game in sportradar_game_list:
-      if game['status'] != 'closed' and game['status'] != 'inprogress':
-        try:
-          # Read item to check if it exists
-          cosmos_games_container.read_item(item=game['id'], partition_key=data['week']['id'])
-          logger.warning(f"Game {game['id']} already exists.")
-          continue
-        except CosmosResourceNotFoundError:
-          name = f"{game['home']['name']} vs {game['away']['name']}"
-          scheduled = game['scheduled']
-          logger.info(f"Saving game: {name} scheduled for: {scheduled}")
-          cosmos_games_container.create_item(body={
-            'contract_address': '0xC8334AaF263Ec942778c6B04e1dF2d9Bcd08cCa1',
-            'id': game['id'],
-            'week_id': data['week']['id'],
-            'name': name,
-            'scheduled': scheduled,
-            'players': [],
-            'claimed_squares': [],
-            'payouts': [],
-            'status': game['status'],
-            'scoring_plays': []
-          })
+      try:
+        # Read item to check if it exists
+        cosmos_games_container.read_item(item=game['id'], partition_key=data['week']['id'])
+        logger.warning(f"Game {game['id']} already exists.")
+        continue
+      except CosmosResourceNotFoundError:
+        name = f"{game['home']['name']} vs {game['away']['name']}"
+        scheduled = game['scheduled']
+        logger.info(f"Saving game: {name} scheduled for: {scheduled}")
+        cosmos_games_container.create_item(body={
+          'contract_address': '0xC8334AaF263Ec942778c6B04e1dF2d9Bcd08cCa1',
+          'id': game['id'],
+          'week_id': WEEK_ID,
+          'name': name,
+          'scheduled': scheduled,
+          'players': [],
+          'claimed_squares': [],
+          'payouts': [],
+          'status': game['status'],
+          'scoring_plays': []
+        })
 
-          logger.info(f"Game {game['id']} saved: {name}")
-
-@socketio.on('heartbeat')
-def handle_heartbeat(data):
-  logger.info('Received heartbeat from client.')
-  logger.info(data)
-  # Emit a response back to the client
-  emit('heartbeat_response', 'pong')
+        logger.info(f"Game {game['id']} saved: {name}")
 
 @socketio.on('unclaim_square')
 def handle_unclaim_square(data):
@@ -406,28 +433,38 @@ def handle_connect():
     
     player_id = request.args.get('player_id')
 
-    global cosmos_games_container
+    # global cosmos_games_container
+    # results = list(cosmos_games_container.query_items(
+    #   query="SELECT * FROM c WHERE c.status!=@status",
+    #   parameters=[
+    #     {"name": "@status", "value": "closed"}
+    #   ],
+    #   enable_cross_partition_query=True
+    # ))
+
+    # week_id = results[0]['week_id']
+    global WEEK_ID
   
     player_data = {
       "id": player_id,
-      "level": 0,  
       "address": "",
-      "games": []
+      "games": [],
+      "week_id": WEEK_ID
     }
 
     player = Player(**player_data)
 
     global cosmos_players_container
     try:
-      cosmos_players_container.read_item(item=player.id, partition_key=player.level)
+      cosmos_players_container.read_item(item=player.id, partition_key=player.week_id)
     except CosmosResourceNotFoundError:
       cosmos_players_container.upsert_item(body=player.model_dump())
 
     logger.info(f"Player {player.id} connected.")
 
-    join_room(player.id)
+    join_room(player.id, namespace='/')
 
-    emit('connected', player.model_dump(), room=player.id)
+    emit('connected', player.model_dump(), to=player.id, namespace='/')
   except Exception as e:
     logger.error(f"An error occurred in handle_connect: {str(e)}")
 
@@ -478,12 +515,12 @@ if __name__ == '__main__':
 
   week_id = '0796e6a9-84ca-4651-9813-bc8bb391ad95'
 
-  scheduled = [ "2023-11-30T22:20:00+00:00", 
-                "2023-11-30T22:21:00+00:00", 
-                "2023-11-30T22:22:00+00:00"]
+  scheduled = [ "2023-12-05T03:01:13+00:00", 
+                "2023-12-05T03:02:13+00:00", 
+                "2023-12-05T03:03:13+00:00"]
   
   game1 = Game(
-    id="6101c145-f366-4918-8642-d7936f38c214",
+    id="4d89a5c1-9d45-40fa-acb9-4af0b43cfe72",
     week_id=week_id,
     contract_address="", 
     name="Game 1", 
@@ -495,7 +532,7 @@ if __name__ == '__main__':
     scoring_plays=[])
   
   game2 = Game(
-    id="4d89a5c1-9d45-40fa-acb9-4af0b43cfe72",
+    id="64ef040c-fbfd-4599-8d5f-0af7c00a6f67",
     week_id=week_id,
     contract_address=" ", 
     name="Game 2", 
@@ -507,7 +544,7 @@ if __name__ == '__main__':
     scoring_plays=[])
   
   game3 = Game(
-    id="64ef040c-fbfd-4599-8d5f-0af7c00a6f67",
+    id="92503fb3-b59c-4c54-a639-fa88067a3e17",
     week_id=week_id,
     contract_address=" ", 
     name="Game 3", 
@@ -517,14 +554,12 @@ if __name__ == '__main__':
     claimed_squares=[], 
     payouts=[], 
     scoring_plays=[])
-
-  games = [game1, game2, game3]
-
-  # scheduling_thread = Thread(target=schedule_games, args=(games, ))
-  # scheduling_thread.start()
-
-  # receiver_thread = Thread(target=receive_events, args=(EVENTHUB_CONNECTION_STR, EVENTHUB_NAME, ))
-  # receiver_thread.start()
+  
+  games = [game1]
+  # games = get_saved_games_for_week()
+  # [game for game in games if ten_min_from_start(game)]
+  scheduling_thread = Thread(target=schedule_games, args=(games, ))
+  scheduling_thread.start()
 
   logger.info('Starting server...')
   
