@@ -84,6 +84,7 @@ def poll_boxscore(game_id, week_id):
       home_team=home_team,
       away_team=away_team
     )
+    
     current_scoring_plays.append(scoring_play)
     logger.info(f"Size current scoring plays: {len(current_scoring_plays)}")
 
@@ -92,14 +93,16 @@ def poll_boxscore(game_id, week_id):
     idx = len(current_scoring_plays) - num_new_scoring_plays
     logger.info(f"Starting idx: {idx}")
 
-    for idx in range(num_new_scoring_plays, len(current_scoring_plays)):
-      scoring_play_dto = ScoringPlayDTO(
-        event_num=count, 
-        game_id=game_id, 
-        week_id=week_id, 
-        scoring_play=current_scoring_plays[idx].model_dump())
-      logger.info(f"Sending event dto: {scoring_play_dto.model_dump_json()}")
-      send_event(scoring_play_dto.model_dump_json())
+    # for idx in range(num_new_scoring_plays, len(current_scoring_plays)):
+    scoring_play_dto = ScoringPlayDTO(
+      event_num=count, 
+      game_id=game_id, 
+      week_id=week_id, 
+      scoring_play=scoring_play.model_dump())
+    
+    logger.info(f"Sending event dto: {scoring_play_dto.model_dump_json()}")
+    
+    send_event(scoring_play_dto.model_dump_json())
 
     # logger.info(f"Size scoring plays: {len(current_scoring_plays)}")     
 

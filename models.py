@@ -24,6 +24,7 @@ class ScoringPlay(BaseModel):
   away_points: int
   home_team: str
   away_team: str
+  offset: Optional[int] = 0
   
 class Game(BaseModel):
   id: str

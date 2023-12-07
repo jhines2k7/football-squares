@@ -1,3 +1,5 @@
+import threading
+import time
 from gevent import monkey
 monkey.patch_all()
 
@@ -174,13 +176,61 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
       logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, to=room, namespace='/')
 
+def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id):
+    time.sleep(2)  # Timeout of 10 seconds
+    logger.info(f"Message to retry: {message}")
+    # will need game_id, week_id, player_id, message_id
+    # logger.warn(f"No acknowledgment received for message {message_id} sent to {message_dump['square']['player_id']}")
+    # retry the message
+    if not hasattr(threading.current_thread(), "do_run") or threading.current_thread().do_run:
+      logger.warning(f"Retrying message sent to {player_id}-{game_id}")
+      with app.app_context():  # Ensure the Flask app context is available
+        # socketio.emit('timeout_alert', {'message_id': message_id}, room=socket_id)
+        def acknowledge(response: Any):
+          logger.info(f"Successfully resent message {message_id} to {player_id}-{game_id}")          
+        
+        emit('mark_unclaimed_square_match', 
+              {
+                'event_num': message_id,
+                'square': {
+                  'game_id': game_id,
+                },
+              }, 
+              to=f"{player_id}-{game_id}", 
+              namespace='/',
+              callback=acknowledge)
+
 def send_to_all(event:str, message:Any, game: Game):
   logger.info(f"Broadcasting message to all players in game: {game.id}")
   for player_id in game.players:
+    
+    # Start a timeout thread
+    global redis_client
+    offset = int(redis_client.get('scoring_play_offset'))
+    logger.info(f"Offset: {offset}")
+
+    timeout_thread = threading.Thread(target=acknowledgment_timeout, args=(
+      message, 
+      game.id, 
+      game.week_id, 
+      player_id, 
+      offset)
+    )
+    timeout_thread.start()
+
     room = f"{player_id}-{game.id}"
+
+    def acknowledge(response: Any):
+      logger.info(f"Acknowledgment received for message {offset} sent to {room}")
+      # If acknowledgment is received, you can stop the timeout thread
+      timeout_thread.do_run = False
+
     logger.info(f"Sending message {message} to room: {room}")
     
-    emit(event, message, to=room, namespace='/')
+    emit(event, message, to=room, namespace='/', callback=acknowledge)
+
+def ack_message(response):
+  logger.info(f"Received message: {response}")
 
 @app.route('/scoring-play/<game_id>', methods=['POST'])
 def scoring_play(game_id: str):
@@ -191,12 +241,16 @@ def scoring_play(game_id: str):
   logger.info(f"Scoring play dto: {scoring_play_dto.model_dump_json()}")
 
   global cosmos_games_container
+  global redis_client
 
   try:
     result = cosmos_games_container.read_item(item=game_id, partition_key=scoring_play_dto.week_id)
     game = Game(**result)
     
     scoring_play = scoring_play_dto.scoring_play
+
+    redis_client.incr('scoring_play_offset')
+    scoring_play.offset = int(redis_client.get('scoring_play_offset'))
     logger.info(f"Scoring play: {scoring_play.model_dump_json()} will be added to game: {game.id}")
 
     game.scoring_plays.append(scoring_play)
@@ -223,7 +277,7 @@ def scoring_play(game_id: str):
 
       logger.info(f"Square found: {square}")
       
-      emit('square_match', message, to=square.player_id, namespace='/')
+      emit('square_match', message, to=square.player_id, namespace='/', callback=ack_message)
       send_to_all_except('mark_claimed_square_match', message, game, square.player_id)
     else:
       square_data = {
@@ -285,6 +339,22 @@ def get_games():
     "week_id": game.week_id,
     "game_id": game.id, 
     "name": game.name} for game in games])
+
+# if the connection state recovery was not successful
+@socketio.on('reconnect_failed')
+def handle_reconnect_failed(data):
+  logger.info('Client reconnection failed.')
+  logger.info(f"Data: {data}")
+  # get the scoring plays for the game where the scoring play offset is greater than the given offset
+  global cosmos_games_container
+  results = list(cosmos_games_container.query_items(
+    query="SELECT * FROM c WHERE c.game_id!=@game_id and c.week_id=@week_id",
+    parameters=[
+      {"name": "@game_id", "value": data['game_id']},
+      {"name": "@week_id", "value": data['week_id']}
+    ],
+    enable_cross_partition_query=True
+  ))
 
 @socketio.on('leave_game')
 def leave_game(data):
