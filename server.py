@@ -175,6 +175,7 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
       room = f"{player_id}-{game.id}"
       logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, to=room, namespace='/')
+    time.sleep(0.2)
 
 def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id):
     time.sleep(2)  # Timeout of 10 seconds
@@ -201,7 +202,7 @@ def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id)
               callback=acknowledge)
 
 def send_to_all(event:str, message:Any, game: Game):
-  logger.info(f"Broadcasting message to all players in game: {game.id}")
+  logger.info(f"Broadcasting '{event}' to all players in game: {game.id}")
   for player_id in game.players:
     
     # Start a timeout thread
@@ -209,23 +210,23 @@ def send_to_all(event:str, message:Any, game: Game):
     offset = int(redis_client.get('scoring_play_offset'))
     logger.info(f"Offset: {offset}")
 
-    timeout_thread = threading.Thread(target=acknowledgment_timeout, args=(
-      message, 
-      game.id, 
-      game.week_id, 
-      player_id, 
-      offset)
-    )
-    timeout_thread.start()
+    # timeout_thread = threading.Thread(target=acknowledgment_timeout, args=(
+    #   message, 
+    #   game.id, 
+    #   game.week_id, 
+    #   player_id, 
+    #   offset)
+    # )
+    # timeout_thread.start()
 
     room = f"{player_id}-{game.id}"
 
     def acknowledge(response: Any):
-      logger.info(f"Acknowledgment received for message {offset} sent to {room}")
+      logger.info(f"Acknowledgment received for '{event}' message# {offset} sent to {room}")
       # If acknowledgment is received, you can stop the timeout thread
-      timeout_thread.do_run = False
+      # timeout_thread.do_run = False
 
-    logger.info(f"Sending message {message} to room: {room}")
+    logger.info(f"Sending '{event}' to room: {room}")
     
     emit(event, message, to=room, namespace='/', callback=acknowledge)
 
@@ -244,7 +245,7 @@ def scoring_play(game_id: str):
   global redis_client
 
   try:
-    result = cosmos_games_container.read_item(item=game_id, partition_key=scoring_play_dto.week_id)
+    result = cosmos_games_container.read_item(item=scoring_play_dto.game_id, partition_key=scoring_play_dto.week_id)
     game = Game(**result)
     
     scoring_play = scoring_play_dto.scoring_play
@@ -268,6 +269,8 @@ def scoring_play(game_id: str):
 
     square = find_square_by_id(game.claimed_squares, square_id_to_find)
 
+    player_id = '84e48318-07f1-4fd9-b503-5eb0a17eaf27'
+
     if square is not None:
       message = {
         'event_num': scoring_play_dto.event_num,
@@ -277,7 +280,7 @@ def scoring_play(game_id: str):
 
       logger.info(f"Square found: {square}")
       
-      emit('square_match', message, to=square.player_id, namespace='/', callback=ack_message)
+      emit('square_match', message, to=f"{square.player_id}-{game.id}", namespace='/', callback=ack_message)
       send_to_all_except('mark_claimed_square_match', message, game, square.player_id)
     else:
       square_data = {
@@ -295,11 +298,12 @@ def scoring_play(game_id: str):
       }
 
       logger.info(f"No square found for scoring play: {scoring_play.model_dump_json()}")
-      # emit('mark_unclaimed_square_match', message, room=game.id, namespace='/')
-      send_to_all('mark_unclaimed_square_match', message, game)
+      emit('mark_unclaimed_square_match', message, to=game.id, namespace='/')
+      # send_to_all('mark_unclaimed_square_match', message, game)
       logger.info(f"Broadcasted message to all players in game: {game.id}")
   
   except CosmosResourceNotFoundError:
+    logger.error(f"Game {game_id} not found.")
     return jsonify([])
 
   return jsonify({ 'success': True })
@@ -583,14 +587,14 @@ if __name__ == '__main__':
 
   save_games_for_current_week()
 
-  week_id = '0796e6a9-84ca-4651-9813-bc8bb391ad95'
+  week_id = 'ee7d2acc-de87-4f2d-991b-53b553f9e1cf'
 
-  scheduled = [ "2023-12-05T03:01:13+00:00", 
-                "2023-12-05T03:02:13+00:00", 
-                "2023-12-05T03:03:13+00:00"]
+  scheduled = [ "2023-12-08T23:34:00+00:00", 
+                "2023-12-08T23:32:00+00:00", 
+                "2023-12-08T23:32:00+00:00"]
   
   game1 = Game(
-    id="4d89a5c1-9d45-40fa-acb9-4af0b43cfe72",
+    id="aa0f5109-cc6b-41b3-be37-b47d80e21e51",
     week_id=week_id,
     contract_address="", 
     name="Game 1", 
