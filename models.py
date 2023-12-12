@@ -25,6 +25,9 @@ class ScoringPlay(BaseModel):
   home_team: str
   away_team: str
   offset: Optional[int] = 0
+  week_id: str
+  event_num: int
+  game_id: str
   
 class Game(BaseModel):
   id: str

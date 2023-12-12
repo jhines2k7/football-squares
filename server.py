@@ -1,3 +1,4 @@
+import random
 import threading
 import time
 from gevent import monkey
@@ -32,7 +33,6 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from multiprocessing import Process, Value
 from rq import Queue, Worker
-from poll_boxscore_task import poll_boxscore
 from rq_scheduler import Scheduler
 from healthcheck import HealthCheck
 from decimal import Decimal
@@ -112,6 +112,7 @@ SPORTRADAR_CURRENT_WEEK_URL = os.getenv("SPORTRADAR_CURRENT_WEEK_URL")
 SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY")
 EVENTHUB_CONNECTION_STR = os.getenv("EVENTHUB_CONNECTION_STR")
 EVENTHUB_NAME = os.getenv("EVENTHUB_NAME")
+SPORTRADAR_BOXSCORE_URL = os.getenv("SPORTRADAR_BOXSCORE_URL")
 
 # Connection
 # web3 = Web3(Web3.HTTPProvider(HTTP_PROVIDER))
@@ -153,21 +154,6 @@ def eth_to_usd(eth_balance):
   eth_price = Decimal(latest_price)  # convert the result to Decimal
   return eth_balance * eth_price
 
-def start_worker_for_queue(queue_name: str):
-  worker = Worker([Queue(queue_name, connection=redis_client)], connection=redis_client)
-  worker.work()
- 
-def schedule_task_with_dedicated_worker(game: Game, run_at: datetime):
-  # Create a scheduler instance and schedule the task
-  scheduler = Scheduler(queue_name=game.id, connection=redis_client)
-  
-  scheduler.enqueue_at(run_at, poll_boxscore, game.id, game.week_id, timeout=-1)
- 
-  # Start a dedicated worker for this queue
-  p = Process(target=start_worker_for_queue, args=(game.id, ))
-  p.start()
-  return p
-
 def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:str):
   logger.info(f"Broadcasting message to all except: {excluded_player_id}")
   for player_id in game.players:
@@ -175,7 +161,7 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
       room = f"{player_id}-{game.id}"
       logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, to=room, namespace='/')
-    time.sleep(0.2)
+    time.sleep(0.4)
 
 def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id):
     time.sleep(2)  # Timeout of 10 seconds
@@ -204,7 +190,6 @@ def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id)
 def send_to_all(event:str, message:Any, game: Game):
   logger.info(f"Broadcasting '{event}' to all players in game: {game.id}")
   for player_id in game.players:
-    
     # Start a timeout thread
     global redis_client
     offset = int(redis_client.get('scoring_play_offset'))
@@ -227,32 +212,25 @@ def send_to_all(event:str, message:Any, game: Game):
       # timeout_thread.do_run = False
 
     logger.info(f"Sending '{event}' to room: {room}")
-    
-    emit(event, message, to=room, namespace='/', callback=acknowledge)
+
+    with app.app_context():  # Ensure the Flask app context is available
+      emit(event, message, to=room, namespace='/', callback=acknowledge)
+      socketio.sleep(0)
 
 def ack_message(response):
-  logger.info(f"Received message: {response}")
+  logger.info(f"Acknowledgment received for '{response}")
 
-@app.route('/scoring-play/<game_id>', methods=['POST'])
-def scoring_play(game_id: str):
-  # data = request.get_json()
-  logger.info(f"Scoring play data received: {request.get_json()}")
-  scoring_play_dto = ScoringPlayDTO.model_validate_json(request.get_json())
-  # scoring_play_dto = ScoringPlayDTO(**request.get_json())
-  logger.info(f"Scoring play dto: {scoring_play_dto.model_dump_json()}")
-
+# @app.route('/scoring-play/<game_id>', methods=['POST'])
+def process_scoring_play(scoring_play: ScoringPlay):
   global cosmos_games_container
   global redis_client
-
   try:
-    result = cosmos_games_container.read_item(item=scoring_play_dto.game_id, partition_key=scoring_play_dto.week_id)
+    result = cosmos_games_container.read_item(item=scoring_play.game_id, partition_key=scoring_play.week_id)
     game = Game(**result)
     
-    scoring_play = scoring_play_dto.scoring_play
-
     redis_client.incr('scoring_play_offset')
     scoring_play.offset = int(redis_client.get('scoring_play_offset'))
-    logger.info(f"Scoring play: {scoring_play.model_dump_json()} will be added to game: {game.id}")
+    # logger.info(f"Scoring play: {scoring_play.model_dump_json()} will be added to game: {game.id}")
 
     game.scoring_plays.append(scoring_play)
 
@@ -269,11 +247,9 @@ def scoring_play(game_id: str):
 
     square = find_square_by_id(game.claimed_squares, square_id_to_find)
 
-    player_id = '84e48318-07f1-4fd9-b503-5eb0a17eaf27'
-
     if square is not None:
       message = {
-        'event_num': scoring_play_dto.event_num,
+        'event_num': scoring_play.event_num,
         'square': square.model_dump(),
         'scoring_play': scoring_play.model_dump()
       }
@@ -292,35 +268,39 @@ def scoring_play(game_id: str):
         "away_points": away_points_ones
       }
       message = {
-        'event_num': scoring_play_dto.event_num,
+        'event_num': scoring_play.event_num,
         'square': Square(**square_data).model_dump(),
         'scoring_play': scoring_play.model_dump()
       }
 
-      logger.info(f"No square found for scoring play: {scoring_play.model_dump_json()}")
-      emit('mark_unclaimed_square_match', message, to=game.id, namespace='/')
+      # logger.info(f"No square found for scoring play: {scoring_play.model_dump_json()}")
       # send_to_all('mark_unclaimed_square_match', message, game)
+
+      with app.app_context():
+        emit('mark_unclaimed_square_match', message, to=game.id, namespace='/', callback=ack_message)
+        socketio.sleep(0)
+
       logger.info(f"Broadcasted message to all players in game: {game.id}")
   
   except CosmosResourceNotFoundError:
-    logger.error(f"Game {game_id} not found.")
-    return jsonify([])
+    logger.error(f"Game {scoring_play.id} not found.")
+    # return jsonify([])
 
-  return jsonify({ 'success': True })
+  # return jsonify({ 'success': True })
 
 def find_square_by_id(squares: List[Square], square_id: str):
   for square in squares:
     if square.id == square_id:
       return square
     
-def ten_min_from_start(game):
+def ten_min_from_start(game: Game):
   scheduled_time = datetime.strptime(game.scheduled, '%Y-%m-%dT%H:%M:%S%z')
   current_time = datetime.now(timezone.utc)
   time_difference = scheduled_time - current_time
   if time_difference.total_seconds() >= 600:
     return True
 
-def get_saved_games_for_week():
+def get_scheduled_games_for_week():
   global WEEK_ID
   global cosmos_games_container
   results = list(cosmos_games_container.query_items(
@@ -332,17 +312,21 @@ def get_saved_games_for_week():
     enable_cross_partition_query=True
   ))
 
+  # game1 = Game(**results[0])
+  # logger.info(f"Game 1: {game1.model_dump_json()}")
+
   return [Game(**game) for game in results]
 
 @app.route('/games', methods=['GET'])
 def get_games():
-  games = get_saved_games_for_week()
+  games = get_scheduled_games_for_week()
   # scheduled_games = [game for game in games if ten_min_from_start(game)]
+  scheduled_games = [game for game in games]
 
   return jsonify([{
     "week_id": game.week_id,
     "game_id": game.id, 
-    "name": game.name} for game in games])
+    "name": game.name} for game in scheduled_games])
 
 # if the connection state recovery was not successful
 @socketio.on('reconnect_failed')
@@ -359,6 +343,10 @@ def handle_reconnect_failed(data):
     ],
     enable_cross_partition_query=True
   ))
+
+@socketio.on_error(namespace='/')
+def socketio_error_handler(e):
+    logger.error(f"An error has occurred: {e}")
 
 @socketio.on('leave_game')
 def leave_game(data):
@@ -409,7 +397,7 @@ def join_game(data):
 
   if player.id in game.players:
     logger.info(f"Player {player.id} already joined game.")
-    # join_room(game.id, namespace='/')
+    join_room(game.id, namespace='/')
     join_room(f"{player.id}-{game.id}", namespace='/')
     emit('game_joined', game.model_dump(), to=player.id, namespace='/')
     return
@@ -424,14 +412,14 @@ def join_game(data):
 
   logger.info(f"Game state after player {player.id} joined game: {game.model_dump_json()}")
 
-  # join_room(game.id, namespace='/')
+  join_room(game.id, namespace='/')
   join_room(f"{player.id}-{game.id}", namespace='/')
   
   emit('game_joined', game.model_dump(), room=player.id, namespace='/')
   send_to_all_except('new_player_joined', { "player_id": player.id, "game_id": game.id }, game, player.id)
 
 def save_games_for_current_week():
-  logger.info('Games for current week...')
+  # logger.info('Games for current week...')
 
   response = requests.get(f"{SPORTRADAR_CURRENT_WEEK_URL}?api_key={SPORTRADAR_API_KEY}")
   
@@ -447,15 +435,18 @@ def save_games_for_current_week():
     for game in sportradar_game_list:
       try:
         # Read item to check if it exists
-        cosmos_games_container.read_item(item=game['id'], partition_key=data['week']['id'])
-        logger.warning(f"Game {game['id']} already exists.")
+        existing_game = cosmos_games_container.read_item(item=game['id'], partition_key=data['week']['id'])
+        existing_game['status'] = game['status']
+
+        logger.warning(f"Game {game['id']} already exists. Updating status")
+        cosmos_games_container.replace_item(item=existing_game['id'], body=existing_game)
         continue
       except CosmosResourceNotFoundError:
         name = f"{game['home']['name']} vs {game['away']['name']}"
         scheduled = game['scheduled']
         logger.info(f"Saving game: {name} scheduled for: {scheduled}")
         cosmos_games_container.create_item(body={
-          'contract_address': '0xC8334AaF263Ec942778c6B04e1dF2d9Bcd08cCa1',
+          'contract_address': '',
           'id': game['id'],
           'week_id': WEEK_ID,
           'name': name,
@@ -542,20 +533,6 @@ def handle_connect():
   except Exception as e:
     logger.error(f"An error occurred in handle_connect: {str(e)}")
 
-def schedule_games(games: List[Game]):
-  processes = []
-  for game in games:    
-    run_at = datetime.fromisoformat(game.scheduled)
-    logger.info(f"Scheduling job for game id: {game.id} at {run_at}")
-    p = schedule_task_with_dedicated_worker(game, run_at)
-    logger.info(f"Scheduled job for game id: {game.id} at {run_at}")
-    processes.append(p)
-
-  # Write each pid from the processes array to file
-  with open('worker_pids.txt', 'a') as file:
-    for p in processes:
-      file.write(f"{p.pid}\n")
-
 def create_cosmos_games_container():
   client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
   database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
@@ -567,6 +544,56 @@ def create_cosmos_games_container():
     offer_throughput=400
   )
 
+def poll_box_score(game_id, week_id):
+  previous_scoring_plays = []
+  home_team = None
+  away_team = None
+
+  start_time = datetime.now()
+  logger.info(f"Started polling the boxscore for game: {game_id} at {start_time}")
+  
+  count = 0
+  # while data['status'] != 'closed':
+  while True:
+    logger.info(f"Polling boxscore for game id: {game_id}")
+    response = requests.get(f"{SPORTRADAR_BOXSCORE_URL}/{game_id}/boxscore.json?api_key={SPORTRADAR_API_KEY}")
+
+    if response.status_code == 200:
+      data = response.json()
+      scoring_plays = data['scoring_plays']
+      home_team = f"{data['summary']['home']['market']} {data['summary']['home']['name']}"
+      away_team = f"{data['summary']['away']['market']} {data['summary']['away']['name']}"
+    
+      if len(scoring_plays) - len(previous_scoring_plays) > 0:
+        starting_idx = len(scoring_plays) - (len(scoring_plays) - len(previous_scoring_plays))
+        logger.info(f"Starting index: {starting_idx}")
+      
+        for idx in range(starting_idx, len(scoring_plays)):
+          scoring_play = ScoringPlay(
+            id=scoring_plays[idx]['id'],
+            type=scoring_plays[idx]['type'],
+            play_type=scoring_plays[idx]['play_type'],
+            home_points=scoring_plays[idx]['home_points'],
+            away_points=scoring_plays[idx]['away_points'],
+            home_team=home_team,
+            away_team=away_team,
+            week_id=week_id,
+            event_num=count,
+            game_id=game_id
+          )
+        
+          process_scoring_play(scoring_play)
+
+        count += 1
+        
+        previous_scoring_plays.clear()
+        previous_scoring_plays = scoring_plays.copy()
+    else:
+      logger.error(f"Request failed with status code {response.status_code}")
+      continue
+
+    time.sleep(30)
+        
 def create_cosmos_players_container():
   client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
   database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
@@ -586,54 +613,24 @@ if __name__ == '__main__':
   cosmos_players_container = create_cosmos_players_container()
 
   save_games_for_current_week()
+  
+  games = get_scheduled_games_for_week()
+  logger.info(f"Games for current week: {games}")
 
-  week_id = 'ee7d2acc-de87-4f2d-991b-53b553f9e1cf'
+  polling_threads = []
+  
+  for game in games:
+    polling_thread = threading.Thread(target=poll_box_score, args=(game.id, game.week_id))
+    polling_threads.append(polling_thread)
+    polling_thread.start()
 
-  scheduled = [ "2023-12-08T23:34:00+00:00", 
-                "2023-12-08T23:32:00+00:00", 
-                "2023-12-08T23:32:00+00:00"]
+  # for thread in polling_threads:
+  #   thread.join()
   
-  game1 = Game(
-    id="aa0f5109-cc6b-41b3-be37-b47d80e21e51",
-    week_id=week_id,
-    contract_address="", 
-    name="Game 1", 
-    scheduled=scheduled[0], 
-    status="", 
-    players=[], 
-    claimed_squares=[], 
-    payouts=[], 
-    scoring_plays=[])
-  
-  game2 = Game(
-    id="64ef040c-fbfd-4599-8d5f-0af7c00a6f67",
-    week_id=week_id,
-    contract_address=" ", 
-    name="Game 2", 
-    scheduled=scheduled[1], 
-    status="", 
-    players=[], 
-    claimed_squares=[], 
-    payouts=[], 
-    scoring_plays=[])
-  
-  game3 = Game(
-    id="92503fb3-b59c-4c54-a639-fa88067a3e17",
-    week_id=week_id,
-    contract_address=" ", 
-    name="Game 3", 
-    scheduled=scheduled[2], 
-    status="", 
-    players=[], 
-    claimed_squares=[], 
-    payouts=[], 
-    scoring_plays=[])
-  
-  games = [game1]
-  # games = get_saved_games_for_week()
-  # [game for game in games if ten_min_from_start(game)]
-  scheduling_thread = Thread(target=schedule_games, args=(games, ))
-  scheduling_thread.start()
+  # Write each pid from the threads array to file
+  # with open('worker_pids.txt', 'a') as file:
+  #   for p in polling_threads:
+  #     file.write(f"{p.pid}\n")
 
   logger.info('Starting server...')
   
