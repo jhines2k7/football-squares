@@ -20,6 +20,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2 import service_account
+from googleapiclient.http import MediaIoBaseDownload
 
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, emit, leave_room
@@ -87,12 +88,11 @@ args = parser.parse_args()
 load_dotenv(args.env)
 # HTTP_PROVIDER = os.getenv("HTTP_PROVIDER")
 # CONTRACT_OWNER_PRIVATE_KEY = os.getenv("CONTRACT_OWNER_PRIVATE_KEY")
-# RPS_CONTRACT_ADDRESS = os.getenv("RPS_CONTRACT_ADDRESS")
-# logger.info(f"RPS contract address: {RPS_CONTRACT_ADDRESS}")
+# FS_CONTRACT_ADDRESS = os.getenv("FS_CONTRACT_ADDRESS")
 KEYFILE = os.getenv("KEYFILE")
 CERTFILE = os.getenv("CERTFILE")
-# COINGECKO_API = os.getenv("COINGECKO_API")
-# GAS_ORACLE_API_KEY = os.getenv("GAS_ORACLE_API_KEY")
+COINGECKO_API = os.getenv("COINGECKO_API")
+GAS_ORACLE_API_KEY = os.getenv("GAS_ORACLE_API_KEY")
 COSMOS_ENDPOINT = os.getenv("COSMOS_ENDPOINT")
 COSMOS_KEY = os.getenv("COSMOS_KEY")
 COSMOS_DB_NAME = os.getenv("COSMOS_DB_NAME")
@@ -131,14 +131,13 @@ app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 
-# rps_contract_factory_abi = None
-# rps_contract_abi = None
 cosmos_games_container = None
 cosmos_players_container = None
 # queue_client = None
-# gas_oracle = []
+gas_oracles = []
 ethereum_prices = []
 WEEK_ID = None
+fs_contract_abi = None
 
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
@@ -149,10 +148,161 @@ redis_client = redis.Redis(host=REDIS_HOST,
                   password=REDIS_PASSWORD,
                   ssl=True, ssl_cert_reqs=None)
 
-def eth_to_usd(eth_balance):
-  latest_price = ethereum_prices[-1] #get_eth_price()
-  eth_price = Decimal(latest_price)  # convert the result to Decimal
-  return eth_balance * eth_price
+def get_service(api_name, api_version, scopes, key_file_location):
+  """Get a service that communicates to a Google API.
+
+  Args:
+    api_name: The name of the api to connect to.
+    api_version: The api version to connect to.
+    scopes: A list auth scopes to authorize for the application.
+    key_file_location: The path to a valid service account JSON key file.
+
+  Returns:
+    A service that is connected to the specified API.
+  """
+
+  credentials = service_account.Credentials.from_service_account_file(
+  key_file_location)
+
+  scoped_credentials = credentials.with_scopes(scopes)
+
+  # Build the service object.
+  service = build(api_name, api_version, credentials=scoped_credentials)
+
+  return service
+
+def download_contract_abi():
+  # Define the auth scopes to request.
+  scope = 'https://www.googleapis.com/auth/drive.file'
+  key_file_location = 'service-account.json'
+    
+  # Specify the name of the folder you want to retrieve
+  folder_name = 'football-squares'
+  
+  try:
+    # Authenticate and construct service.
+    service = get_service(
+      api_name='drive',
+      api_version='v3',
+      scopes=[scope],
+      key_file_location=key_file_location)
+        
+    results = service.files().list(q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'").execute()
+    folders = results.get('files', [])
+    folder_id = None
+
+    # Print the folder's ID if found
+    if len(folders) > 0:
+      logger.info(f"Folder ID: {folders[0]['id']}")
+      logger.info(f"Folder name: {folders[0]['name']}")
+      folder_id = folders[0]['id']
+    else:
+      logger.info("Folder not found.")
+
+    # Delete all files in the local contracts folder
+    download_dir = 'contracts'
+    logger.info('Deleting all files in the contracts folder...')
+    for file in os.listdir(download_dir):
+      file_path = os.path.join(download_dir, file)
+      try:
+        if os.path.isfile(file_path):
+          os.unlink(file_path)
+      except Exception as e:
+        logger.error(f"An error occurred while deleting file: {file_path}")
+        logger.error(e)
+    # Getting all files in the contracts folder
+    results = service.files().list(q=f"'{folder_id}' in parents and trashed=false", pageSize=1000, fields="nextPageToken, files(id, name, createdTime)").execute()
+    files = results.get('files', [])
+    
+    logger.info('Downloading contract ABIs...')
+    # Download each file from the folder
+    for file in files:
+      request_file = service.files().get_media(fileId=file['id'])
+      # Get the file metadata
+      file_metadata = service.files().get(fileId=file['id']).execute()
+      file_name = file_metadata['name']
+      created_time = datetime.strptime(file['createdTime'], "%Y-%m-%dT%H:%M:%S.%fZ")
+      logger.info(f"File Name: {file_name}, Created Time: {created_time}")
+
+      # Download the file content
+      fh = open(os.path.join("contracts", file_name), 'wb')
+      downloader = MediaIoBaseDownload(fh, request_file)
+
+      done = False
+      while done is False:
+        status, done = downloader.next_chunk()
+        logger.info(f"Download progress {int(status.progress() * 100)}%.")
+
+      print('File downloaded successfully.')
+
+    logger.info('Contract ABIs downloaded successfully!')
+
+    # Load and parse the contract ABIs.
+    with open('contracts/FootballSquares.json') as f:
+      global rps_contract_abi
+      rps_json = json.load(f)
+      rps_contract_abi = rps_json['abi']
+
+  except HttpError as error:
+    # TODO(developer) - Handle errors from drive API.
+    logger.error(f'An error occurred: {error}')
+
+def get_gas_oracle():
+  url = "https://api.etherscan.io/api"
+  payload = {
+    'module': 'gastracker',
+    'action': 'gasoracle',
+    'apikey': GAS_ORACLE_API_KEY
+  }
+
+  for _ in range(5):
+    try:
+      response = requests.get(url, params=payload)
+      response.raise_for_status()
+      return response.json()
+    except (requests.exceptions.RequestException, KeyError):
+      time.sleep(12)
+
+    raise Exception("Failed to fetch gas price after several attempts")
+
+def get_eth_price():
+  for _ in range(5):
+    try:
+      response = requests.get(COINGECKO_API)
+      response.raise_for_status()  # Raise an exception if the request was unsuccessful
+      data = response.json()
+      return data['ethereum']['usd']
+    except (requests.exceptions.RequestException, KeyError):
+      time.sleep(12)
+
+    # If we've gotten to this point, all the retry attempts have failed
+    raise Exception("Failed to fetch Ethereum price after several attempts")
+
+def usd_to_eth(usd):
+  eth_price = ethereum_prices[-1] #get_eth_price()
+  return usd / eth_price
+
+@app.route('/ethereum-price', methods=['GET'])
+def handle_get_ethereum_price():
+  game_id = request.args.get('game_id')
+  
+  game = cosmos_games_container.read_item(item=game_id, partition_key=WEEK_ID)
+
+  if not game:
+    return
+
+  return str(ethereum_prices[-1])
+
+@app.route('/gas-oracle', methods=['GET'])
+def handle_get_gas_oracle():
+  game_id = request.args.get('game_id')
+  
+  game = cosmos_games_container.read_item(item=game_id, partition_key=WEEK_ID)
+
+  if not game:
+    return
+
+  return gas_oracles[-1]
 
 def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:str):
   logger.info(f"Broadcasting message to all except: {excluded_player_id}")
@@ -161,66 +311,24 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
       room = f"{player_id}-{game.id}"
       logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, to=room, namespace='/')
-    time.sleep(0.4)
-
-def acknowledgment_timeout(message:Any, game_id, week_id, player_id, message_id):
-    time.sleep(2)  # Timeout of 10 seconds
-    logger.info(f"Message to retry: {message}")
-    # will need game_id, week_id, player_id, message_id
-    # logger.warn(f"No acknowledgment received for message {message_id} sent to {message_dump['square']['player_id']}")
-    # retry the message
-    if not hasattr(threading.current_thread(), "do_run") or threading.current_thread().do_run:
-      logger.warning(f"Retrying message sent to {player_id}-{game_id}")
-      with app.app_context():  # Ensure the Flask app context is available
-        # socketio.emit('timeout_alert', {'message_id': message_id}, room=socket_id)
-        def acknowledge(response: Any):
-          logger.info(f"Successfully resent message {message_id} to {player_id}-{game_id}")          
-        
-        emit('mark_unclaimed_square_match', 
-              {
-                'event_num': message_id,
-                'square': {
-                  'game_id': game_id,
-                },
-              }, 
-              to=f"{player_id}-{game_id}", 
-              namespace='/',
-              callback=acknowledge)
-
+    
 def send_to_all(event:str, message:Any, game: Game):
   logger.info(f"Broadcasting '{event}' to all players in game: {game.id}")
   for player_id in game.players:
-    # Start a timeout thread
     global redis_client
     offset = int(redis_client.get('scoring_play_offset'))
     logger.info(f"Offset: {offset}")
 
-    # timeout_thread = threading.Thread(target=acknowledgment_timeout, args=(
-    #   message, 
-    #   game.id, 
-    #   game.week_id, 
-    #   player_id, 
-    #   offset)
-    # )
-    # timeout_thread.start()
-
     room = f"{player_id}-{game.id}"
-
-    def acknowledge(response: Any):
-      logger.info(f"Acknowledgment received for '{event}' message# {offset} sent to {room}")
-      # If acknowledgment is received, you can stop the timeout thread
-      # timeout_thread.do_run = False
 
     logger.info(f"Sending '{event}' to room: {room}")
 
-    with app.app_context():  # Ensure the Flask app context is available
-      emit(event, message, to=room, namespace='/', callback=acknowledge)
-      socketio.sleep(0)
-
+    emit(event, message, to=room, namespace='/')
+    socketio.sleep(0)
+      
 def ack_message(response):
   logger.info(f"Acknowledgment received for '{response}")
 
-# @app.route('/scoring-play/<game_id>', methods=['POST'])
 def process_scoring_play(scoring_play: ScoringPlay):
   global cosmos_games_container
   global redis_client
@@ -292,6 +400,9 @@ def find_square_by_id(squares: List[Square], square_id: str):
   for square in squares:
     if square.id == square_id:
       return square
+
+def filter_square_from_game(game: Game, square: Square):
+  return [s for s in game.claimed_squares if s.id != square.id]
     
 def ten_min_from_start(game: Game):
   scheduled_time = datetime.strptime(game.scheduled, '%Y-%m-%dT%H:%M:%S%z')
@@ -304,9 +415,11 @@ def get_scheduled_games_for_week():
   global WEEK_ID
   global cosmos_games_container
   results = list(cosmos_games_container.query_items(
-    query="SELECT * FROM c WHERE c.status!=@status and c.week_id=@week_id",
+    # query="SELECT * FROM c WHERE c.status=@closed and c.week_id=@week_id",
+    query="SELECT * FROM c WHERE c.week_id=@week_id",
+
     parameters=[
-      {"name": "@status", "value": "closed"},
+      # {"name": "@closed", "value": "closed"},
       {"name": "@week_id", "value": WEEK_ID}
     ],
     enable_cross_partition_query=True
@@ -328,6 +441,11 @@ def get_games():
     "game_id": game.id, 
     "name": game.name} for game in scheduled_games])
 
+@app.route('/fs-contract-abi', methods=['GET'])
+def get_fs_contract_abi():
+  with open('contracts/FootballSquares.json') as f:
+    return json.load(f)
+  
 # if the connection state recovery was not successful
 @socketio.on('reconnect_failed')
 def handle_reconnect_failed(data):
@@ -419,8 +537,6 @@ def join_game(data):
   send_to_all_except('new_player_joined', { "player_id": player.id, "game_id": game.id }, game, player.id)
 
 def save_games_for_current_week():
-  # logger.info('Games for current week...')
-
   response = requests.get(f"{SPORTRADAR_CURRENT_WEEK_URL}?api_key={SPORTRADAR_API_KEY}")
   
   global cosmos_games_container
@@ -459,10 +575,12 @@ def save_games_for_current_week():
         })
 
         logger.info(f"Game {game['id']} saved: {name}")
+  else:
+    logger.error(f"Request failed with status code {response.status_code}")
 
 @socketio.on('unclaim_square')
-def handle_unclaim_square(data):
-  square = Square(**data['square'])
+def handle_unclaim_square(square: Square):
+  square = Square(**square)
   logger.info(f"Unclaiming square: {square.model_dump_json()}")
   global cosmos_games_container
   result = cosmos_games_container.read_item(item=square.game_id, partition_key=square.week_id)
@@ -474,6 +592,26 @@ def handle_unclaim_square(data):
   logger.info(f"Game state after square unclaimed: {game.model_dump_json()}")
 
   send_to_all_except('square_unclaimed', square.model_dump(), game, square.player_id)
+
+@socketio.on('unclaim_squares')
+def handle_unclaim_squares(data):
+  game_id = data['game_id']
+  squares_to_unclaim = data['squares_to_unclaim']
+
+  global WEEK_ID
+  global cosmos_games_container
+  game = cosmos_games_container.read_item(item=game_id, partition_key=WEEK_ID)
+
+  filtered_squares = []
+  for square in squares_to_unclaim:
+    logger.info(f"Unclaiming square: {square}")
+    # get the square from the game
+    filtered_squares = filter_square_from_game(game, square['id'])
+
+  game.claimed_squares = filtered_squares
+   
+  cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
+  logger.info(f"Successfully updated game: {game.id}")
 
 @socketio.on('claim_square')
 def handle_claim_square(square: Square):
@@ -489,7 +627,26 @@ def handle_claim_square(square: Square):
   cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
   logger.info(f"Successfully updated game: {game.id}")
 
-  send_to_all_except('square_claimed', square.model_dump(), game, square.player_id)
+  emit('square_claimed', square.model_dump(), include_self=False, to=game.id, namespace='/')
+
+@socketio.on('squares_claimed')
+def handle_squares_claimed(data):
+  player_id = data['player_id']
+  game_id = data['game_id']
+
+  global WEEK_ID
+  global cosmos_games_container
+  results = cosmos_games_container.read_item(item=game_id, partition_key=WEEK_ID)
+
+  game = Game(**results)
+
+  for square in game.claimed_squares:
+    if square.player_id == player_id:
+      logger.info(f"Updating square: {square.model_dump_json()}")
+      square.paid = True
+
+  cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
+  logger.info(f"Successfully updated game: {game}")
 
 @socketio.on('connect')
 def handle_connect():
@@ -498,17 +655,17 @@ def handle_connect():
     
     player_id = request.args.get('player_id')
 
-    # global cosmos_games_container
-    # results = list(cosmos_games_container.query_items(
-    #   query="SELECT * FROM c WHERE c.status!=@status",
-    #   parameters=[
-    #     {"name": "@status", "value": "closed"}
-    #   ],
-    #   enable_cross_partition_query=True
-    # ))
+    global cosmos_games_container
+    results = list(cosmos_games_container.query_items(
+      query="SELECT * FROM c WHERE c.status=@status",
+      parameters=[
+        {"name": "@status", "value": "closed"}
+      ],
+      enable_cross_partition_query=True
+    ))
 
-    # week_id = results[0]['week_id']
     global WEEK_ID
+    WEEK_ID = results[0]['week_id']
   
     player_data = {
       "id": player_id,
@@ -544,23 +701,25 @@ def create_cosmos_games_container():
     offer_throughput=400
   )
 
-def poll_box_score(game_id, week_id):
+def poll_box_score(game:Game):
   previous_scoring_plays = []
   home_team = None
   away_team = None
 
   start_time = datetime.now()
-  logger.info(f"Started polling the boxscore for game: {game_id} at {start_time}")
+  logger.info(f"Started polling the boxscore for game: {game.id} at {start_time}")
   
   count = 0
   # while data['status'] != 'closed':
   while True:
-    logger.info(f"Polling boxscore for game id: {game_id}")
-    response = requests.get(f"{SPORTRADAR_BOXSCORE_URL}/{game_id}/boxscore.json?api_key={SPORTRADAR_API_KEY}")
+    thread_id = threading.get_ident()
+    logger.info(f"Polling boxscore for game id: {game.id} with thread id: {thread_id}")
+    response = requests.get(f"{SPORTRADAR_BOXSCORE_URL}/{game.id}/boxscore.json?api_key={SPORTRADAR_API_KEY}")
 
     if response.status_code == 200:
       data = response.json()
       scoring_plays = data['scoring_plays']
+      logger.info(f"Length of scoring plays: {len(scoring_plays)}")
       home_team = f"{data['summary']['home']['market']} {data['summary']['home']['name']}"
       away_team = f"{data['summary']['away']['market']} {data['summary']['away']['name']}"
     
@@ -577,9 +736,9 @@ def poll_box_score(game_id, week_id):
             away_points=scoring_plays[idx]['away_points'],
             home_team=home_team,
             away_team=away_team,
-            week_id=week_id,
+            week_id=game.week_id,
             event_num=count,
-            game_id=game_id
+            game_id=game.id
           )
         
           process_scoring_play(scoring_play)
@@ -605,24 +764,53 @@ def create_cosmos_players_container():
     offer_throughput=400
   )
 
+def get_eth_prices():
+  while True:
+    current_price = get_eth_price()
+    logger.info(f"Current price of Ethereum: {current_price}")
+    global ethereum_prices
+    ethereum_prices.append(current_price)
+
+    if len(ethereum_prices) > 10:
+      ethereum_prices = ethereum_prices[-5:]
+
+    time.sleep(45)
+
+def get_gas_oracles():
+  while True:
+    gas_oracle = get_gas_oracle()
+    logger.info(f"Gas oracle: {gas_oracle}")
+    global gas_oracles
+    gas_oracles.append(gas_oracle)
+
+    if len(gas_oracles) > 10:
+      gas_oracles = gas_oracles[-5:]
+
+    time.sleep(30)
+
 if __name__ == '__main__':
   from geventwebsocket.handler import WebSocketHandler
   from gevent.pywsgi import WSGIServer
 
+  logger.info('Downloading contract ABIs...')
+  download_contract_abi()
+
   cosmos_games_container = create_cosmos_games_container()
   cosmos_players_container = create_cosmos_players_container()
 
-  save_games_for_current_week()
+  # save_games_for_current_week()
+
+  WEEK_ID = '0796e6a9-84ca-4651-9813-bc8bb391ad95'
   
   games = get_scheduled_games_for_week()
   logger.info(f"Games for current week: {games}")
 
-  polling_threads = []
+  # polling_threads = []
   
-  for game in games:
-    polling_thread = threading.Thread(target=poll_box_score, args=(game.id, game.week_id))
-    polling_threads.append(polling_thread)
-    polling_thread.start()
+  # for game in games:
+  #   polling_thread = threading.Thread(target=poll_box_score, args=(game))
+  #   polling_threads.append(polling_thread)
+  #   polling_thread.start()
 
   # for thread in polling_threads:
   #   thread.join()
@@ -631,6 +819,11 @@ if __name__ == '__main__':
   # with open('worker_pids.txt', 'a') as file:
   #   for p in polling_threads:
   #     file.write(f"{p.pid}\n")
+  thread = threading.Thread(target=get_eth_prices)
+  thread.start()
+  
+  thread = threading.Thread(target=get_gas_oracles)
+  thread.start()
 
   logger.info('Starting server...')
   

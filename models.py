@@ -15,6 +15,7 @@ class Square(BaseModel):
   player_id: str
   game_id: str
   week_id: str
+  paid: Optional[bool] = False
 
 class ScoringPlay(BaseModel):
   id: str
@@ -37,12 +38,13 @@ class Game(BaseModel):
   scheduled: str
   status: str
   players: List[str]
-  claimed_squares: List[Square]
-  payouts: List[Square]
-  scoring_plays: List[ScoringPlay]
+  claimed_squares: Optional[List[Square]] = []
+  payouts: Optional[List[Square]] = []
+  scoring_plays: Optional[List[ScoringPlay]] = [],
+  buyin: Optional[int] = 0
 
 class ScoringPlayDTO(BaseModel):
   event_num: Optional[int] = -1
-  week_id: Optional[str] = "0796e6a9-84ca-4651-9813-bc8bb391ad95"
+  week_id: str
   game_id: str
   scoring_play: ScoringPlay

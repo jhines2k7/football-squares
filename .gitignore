@@ -12,3 +12,4 @@ kill_workers.sh
 .env*
 logs
 worker_pids.txt
+contracts

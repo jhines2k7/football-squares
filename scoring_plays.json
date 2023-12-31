@@ -1,0 +1,137 @@
+[
+    {
+        "id": "bb192310-8a69-11ee-a0cd-c5c8ce32b609",
+        "type": "play",
+        "play_type": "field_goal",
+        "home_points": 3,
+        "away_points": 7,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "6d04af40-8a7e-11ee-8600-8ff23822e737",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 13,
+        "away_points": 31,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "f351f2d0-8a68-11ee-a0cd-c5c8ce32b609",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 0,
+        "away_points": 7,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "d41d35a0-8a68-11ee-a0cd-c5c8ce32b609",
+        "type": "play",
+        "play_type": "rush",
+        "home_points": 0,
+        "away_points": 6,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "4965ba20-8a7e-11ee-8600-8ff23822e737",
+        "type": "play",
+        "play_type": "pass",
+        "home_points": 13,
+        "away_points": 30,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "aca16230-8a6d-11ee-a1d3-570ab2c12d82",
+        "type": "play",
+        "play_type": "rush",
+        "home_points": 3,
+        "away_points": 13,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "2314f2d0-8a7b-11ee-a23f-9be80c45874b",
+        "type": "play",
+        "play_type": "field_goal",
+        "home_points": 13,
+        "away_points": 24,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "8f1c2260-8a70-11ee-a1d3-570ab2c12d82",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 3,
+        "away_points": 21,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "b7918620-8a6d-11ee-a1d3-570ab2c12d82",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 3,
+        "away_points": 14,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "59898180-8a73-11ee-a1d3-570ab2c12d82",
+        "type": "play",
+        "play_type": "field_goal",
+        "home_points": 3,
+        "away_points": 24,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "35642c10-8a78-11ee-a23f-9be80c45874b",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 10,
+        "away_points": 24,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "6a4ee670-8a70-11ee-a1d3-570ab2c12d82",
+        "type": "play",
+        "play_type": "rush",
+        "home_points": 3,
+        "away_points": 20,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "ff963740-8a77-11ee-a23f-9be80c45874b",
+        "type": "play",
+        "play_type": "pass",
+        "home_points": 9,
+        "away_points": 24,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "4965ba20-8a7e-11ee-8600-8ff23822e737",
+        "type": "play",
+        "play_type": "pass",
+        "home_points": 13,
+        "away_points": 30,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    },
+    {
+        "id": "f351f2d0-8a68-11ee-a0cd-c5c8ce32b609",
+        "type": "play",
+        "play_type": "extra_point",
+        "home_points": 0,
+        "away_points": 7,
+        "home_team": "Seattle Seahawks",
+        "away_team": "San Francisco 49ers"
+    }
+]
