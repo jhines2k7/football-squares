@@ -5,8 +5,6 @@ from typing import Optional
 class Player(BaseModel):
   id: str
   address: str
-  games: List[str]
-  week_id: str
 
 class Square(BaseModel):
   id: str
@@ -28,7 +26,6 @@ class ScoringPlay(BaseModel):
   offset: Optional[int] = 0
   week_id: str
   event_num: int
-  game_id: str
   
 class Game(BaseModel):
   id: str
@@ -37,14 +34,8 @@ class Game(BaseModel):
   name: str
   scheduled: str
   status: str
-  players: List[str]
+  players: List[Player] = []
   claimed_squares: Optional[List[Square]] = []
   payouts: Optional[List[Square]] = []
   scoring_plays: Optional[List[ScoringPlay]] = [],
-  buyin: Optional[int] = 0
-
-class ScoringPlayDTO(BaseModel):
-  event_num: Optional[int] = -1
-  week_id: str
-  game_id: str
-  scoring_play: ScoringPlay
+  buyin: Optional[float] = 4.00

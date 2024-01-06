@@ -43,9 +43,9 @@ from typing import Any, List
 from typing import Dict
 from azure.cosmos import CosmosClient, PartitionKey
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
-from models import ScoringPlay, ScoringPlayDTO, Square, Game, Player
+from models import ScoringPlay, Square, Game, Player
 
-import redis
+# import redis
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 logging.basicConfig(
@@ -132,7 +132,6 @@ CORS(app)
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins='*')
 
 cosmos_games_container = None
-cosmos_players_container = None
 # queue_client = None
 gas_oracles = []
 ethereum_prices = []
@@ -142,11 +141,11 @@ fs_contract_abi = None
 health = HealthCheck()
 app.add_url_rule("/healthcheck", "healthcheck", view_func=lambda: health.run())
 
-redis_client = redis.Redis(host=REDIS_HOST, 
-                  port=REDIS_PORT, 
-                  username=REDIS_USERNAME, 
-                  password=REDIS_PASSWORD,
-                  ssl=True, ssl_cert_reqs=None)
+# redis_client = redis.Redis(host=REDIS_HOST, 
+#                   port=REDIS_PORT, 
+#                   username=REDIS_USERNAME, 
+#                   password=REDIS_PASSWORD,
+#                   ssl=True, ssl_cert_reqs=None)
 
 def get_service(api_name, api_version, scopes, key_file_location):
   """Get a service that communicates to a Google API.
@@ -312,32 +311,32 @@ def send_to_all_except(event:str, message:Any, game: Game, excluded_player_id:st
       logger.info(f"Sending message {message} to room: {room}")
       emit(event, message, to=room, namespace='/')
     
-def send_to_all(event:str, message:Any, game: Game):
-  logger.info(f"Broadcasting '{event}' to all players in game: {game.id}")
-  for player_id in game.players:
-    global redis_client
-    offset = int(redis_client.get('scoring_play_offset'))
-    logger.info(f"Offset: {offset}")
+# def send_to_all(event:str, message:Any, game: Game):
+#   logger.info(f"Broadcasting '{event}' to all players in game: {game.id}")
+#   for player_id in game.players:
+#     global redis_client
+#     offset = int(redis_client.get('scoring_play_offset'))
+#     logger.info(f"Offset: {offset}")
 
-    room = f"{player_id}-{game.id}"
+#     room = f"{player_id}-{game.id}"
 
-    logger.info(f"Sending '{event}' to room: {room}")
+#     logger.info(f"Sending '{event}' to room: {room}")
 
-    emit(event, message, to=room, namespace='/')
-    socketio.sleep(0)
+#     emit(event, message, to=room, namespace='/')
+#     socketio.sleep(0)
       
 def ack_message(response):
   logger.info(f"Acknowledgment received for '{response}")
 
 def process_scoring_play(scoring_play: ScoringPlay):
   global cosmos_games_container
-  global redis_client
+  # global redis_client
   try:
     result = cosmos_games_container.read_item(item=scoring_play.game_id, partition_key=scoring_play.week_id)
     game = Game(**result)
     
-    redis_client.incr('scoring_play_offset')
-    scoring_play.offset = int(redis_client.get('scoring_play_offset'))
+    # redis_client.incr('scoring_play_offset')
+    # scoring_play.offset = int(redis_client.get('scoring_play_offset'))
     # logger.info(f"Scoring play: {scoring_play.model_dump_json()} will be added to game: {game.id}")
 
     game.scoring_plays.append(scoring_play)
@@ -364,7 +363,7 @@ def process_scoring_play(scoring_play: ScoringPlay):
 
       logger.info(f"Square found: {square}")
       
-      emit('square_match', message, to=f"{square.player_id}-{game.id}", namespace='/', callback=ack_message)
+      emit('square_match', message, to=f"{square.player_id}-{game.id}", namespace='/')
       send_to_all_except('mark_claimed_square_match', message, game, square.player_id)
     else:
       square_data = {
@@ -499,33 +498,37 @@ def leave_game(data):
       'unclaimed_squares': unclaimed_squares
     }
     
-    send_to_all_except('player_left_game', message, game, data['player_id'])
+    emit('player_left_game', message, to=game.id, include_self=False, namespace='/')
+    # send_to_all_except('player_left_game', message, game, data['player_id'])
 
 @socketio.on('join_game')
 def join_game(data):
+  player_id = data['player_id']
+  game_id = data['game_id']
+  week_id = data['week_id']
+
   global cosmos_games_container
-  result = cosmos_games_container.read_item(item=data['game_id'], partition_key=data['week_id'])
+  result = cosmos_games_container.read_item(item=game_id, partition_key=week_id)
   game = Game(**result)
-  logger.info(f"Game state before player {data['player_id']} joined game: {game.model_dump_json()}")
+  logger.info(f"Game state before player {player_id} joined game: {game.model_dump_json()}")
 
-  global cosmos_players_container
-  result = cosmos_players_container.read_item(item=data['player_id'], partition_key=data['week_id'])
-  player = Player(**result)
-  logger.info(f"Player state before joining game: {player.model_dump_json()}")
+  # find the player by player_id in the list of Player objects
+  for player in game.players:
+    if player.id == player_id:
+      logger.info(f"Player {player_id} already joined game.")
+      join_room(game.id, namespace='/')
+      join_room(f"{player_id}-{game.id}", namespace='/')
+      emit('game_joined', game.model_dump(), to=player_id, namespace='/')
+      return
 
-  if player.id in game.players:
-    logger.info(f"Player {player.id} already joined game.")
-    join_room(game.id, namespace='/')
-    join_room(f"{player.id}-{game.id}", namespace='/')
-    emit('game_joined', game.model_dump(), to=player.id, namespace='/')
-    return
-  
-  player.games.append(game.id)
-  logger.info(f"Player {player.model_dump_json()} joined game: {game.id}")
-  
-  cosmos_players_container.replace_item(item=player.id, body=player.model_dump())
+  player_data = {
+    "id": player_id,
+    "address": ""
+  }
 
-  game.players.append(player.id)
+  player = Player(**player_data)
+
+  game.players.append(player)
   cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
 
   logger.info(f"Game state after player {player.id} joined game: {game.model_dump_json()}")
@@ -534,7 +537,7 @@ def join_game(data):
   join_room(f"{player.id}-{game.id}", namespace='/')
   
   emit('game_joined', game.model_dump(), room=player.id, namespace='/')
-  send_to_all_except('new_player_joined', { "player_id": player.id, "game_id": game.id }, game, player.id)
+  emit('new_player_joined', { "player_id": player.id, "game_id": game.id }, include_self=False, to=game.id, namespace='/')
 
 def save_games_for_current_week():
   response = requests.get(f"{SPORTRADAR_CURRENT_WEEK_URL}?api_key={SPORTRADAR_API_KEY}")
@@ -648,12 +651,14 @@ def handle_squares_claimed(data):
   cosmos_games_container.replace_item(item=game.id, body=game.model_dump())
   logger.info(f"Successfully updated game: {game}")
 
+  emit('squares_claimed', game.claimed_squares, include_self=False, to=game.id, namespace='/')
+
 @socketio.on('connect')
 def handle_connect():
+  player_id = request.args.get('player_id')
+
   try:
-    logger.info('Client connected.')
-    
-    player_id = request.args.get('player_id')
+    logger.info('Client connected.')        
 
     global cosmos_games_container
     results = list(cosmos_games_container.query_items(
@@ -667,26 +672,24 @@ def handle_connect():
     global WEEK_ID
     WEEK_ID = results[0]['week_id']
   
-    player_data = {
-      "id": player_id,
-      "address": "",
-      "games": [],
-      "week_id": WEEK_ID
-    }
+    # player_data = {
+    #   "id": player_id,
+    #   "address": "",
+    #   "games": [],
+    #   "week_id": WEEK_ID
+    # }
 
-    player = Player(**player_data)
+    # player = Player(**player_data)
 
-    global cosmos_players_container
-    try:
-      cosmos_players_container.read_item(item=player.id, partition_key=player.week_id)
-    except CosmosResourceNotFoundError:
-      cosmos_players_container.upsert_item(body=player.model_dump())
+    # global cosmos_players_container
+    # try:
+    #   cosmos_players_container.read_item(item=player.id, partition_key=player.week_id)
+    # except CosmosResourceNotFoundError:
+    #   cosmos_players_container.upsert_item(body=player.model_dump())
 
-    logger.info(f"Player {player.id} connected.")
+    logger.info(f"Player {player_id} connected.")
 
-    join_room(player.id, namespace='/')
-
-    emit('connected', player.model_dump(), to=player.id, namespace='/')
+    join_room(player_id, namespace='/')
   except Exception as e:
     logger.error(f"An error occurred in handle_connect: {str(e)}")
 
@@ -753,16 +756,16 @@ def poll_box_score(game:Game):
 
     time.sleep(30)
         
-def create_cosmos_players_container():
-  client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
-  database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
-  key_path = PartitionKey(path=COSMOS_PLAYERS_PARTITION_KEY_PATH)
+# def create_cosmos_players_container():
+#   client = CosmosClient(url=COSMOS_ENDPOINT, credential=COSMOS_KEY)
+#   database = client.create_database_if_not_exists(id=COSMOS_DB_NAME)
+#   key_path = PartitionKey(path=COSMOS_PLAYERS_PARTITION_KEY_PATH)
 
-  return database.create_container_if_not_exists(
-    id=COSMOS_PLAYERS_CONTAINER_NAME,
-    partition_key=key_path,
-    offer_throughput=400
-  )
+#   return database.create_container_if_not_exists(
+#     id=COSMOS_PLAYERS_CONTAINER_NAME,
+#     partition_key=key_path,
+#     offer_throughput=400
+#   )
 
 def get_eth_prices():
   while True:
@@ -796,7 +799,6 @@ if __name__ == '__main__':
   download_contract_abi()
 
   cosmos_games_container = create_cosmos_games_container()
-  cosmos_players_container = create_cosmos_players_container()
 
   # save_games_for_current_week()
 
